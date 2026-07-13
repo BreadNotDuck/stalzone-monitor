@@ -1,0 +1,25 @@
+region: RU
+api_base_url: https://eapi.stalzone.com
+poll_interval_seconds: 120
+lots_limit: 200
+artifact_lots_limit: 100
+fast_scan: false
+auto_start_monitor: true
+request_delay_seconds: 0.15
+api_max_retries: 5
+scan_workers: 6
+scan_batch_size: 0
+
+watch_artifacts: true
+# 0,1 выключены по умолчанию; включить можно в боте (🎨 Редкости)
+artifact_qualities: [2, 3, 4, 5]
+artifact_potentials: [0, 15]
+catalog_realm: ru
+
+defaults:
+  discount_percent: 10
+  above_reference_percent: 5
+  next_lot_reference_percent: 1
+  auction_fee_percent: 6
+
+custom_items: []

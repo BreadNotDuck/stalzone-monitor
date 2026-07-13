@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.db
+.git/
+.gitignore
+.cursor/
+terminals/
+*.log
+.env
+data/
+README.md
+start.bat
+scripts/
+deploy/

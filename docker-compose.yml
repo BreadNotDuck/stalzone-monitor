@@ -1,0 +1,25 @@
+services:
+  monitor:
+    build: .
+    image: stalzone-monitor:latest
+    container_name: stalzone-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - monitor-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  monitor-data:
+    name: stalzone-monitor-data

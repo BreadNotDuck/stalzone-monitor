@@ -1,0 +1,10 @@
+.env
+deploy/remote.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.db
+data/
+.pytest_cache/
+*.log

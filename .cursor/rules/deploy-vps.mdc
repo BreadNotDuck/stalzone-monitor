@@ -1,0 +1,25 @@
+---
+description: Деплой stalzone-monitor на VPS
+globs:
+alwaysApply: false
+---
+
+# Деплой на VPS
+
+## Через GitHub (предпочтительно)
+
+Если настроены GitHub Secrets (`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_APP_DIR`, `ENV_FILE`):
+
+1. Закоммить изменения и `git push` в `main` — сработает workflow `.github/workflows/deploy.yml`
+2. Или: `gh workflow run deploy.yml` (нужен `gh auth login`)
+3. Логи: GitHub → Actions → Deploy to VPS
+
+## Напрямую с ПК (SSH)
+
+Когда пользователь просит задеплоить без GitHub:
+
+1. Проверь `deploy/remote.env` (из `deploy/remote.env.example`)
+2. `python deploy/push.py --check`
+3. `python deploy/push.py --bootstrap` (первый раз) или `python deploy/push.py`
+
+Не коммить `deploy/remote.env`, `.env`, секреты.

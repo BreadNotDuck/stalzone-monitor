@@ -1,0 +1,20 @@
+[Unit]
+Description=STALZONE Monitor (Telegram bot + auction scanner)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stalzone
+Group=stalzone
+WorkingDirectory=/opt/stalzone-monitor
+EnvironmentFile=/opt/stalzone-monitor/.env
+Environment=TZ=Europe/Moscow
+ExecStart=/opt/stalzone-monitor/.venv/bin/python /opt/stalzone-monitor/main.py --config /opt/stalzone-monitor/config.yaml
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
