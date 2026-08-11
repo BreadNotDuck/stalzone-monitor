@@ -7,9 +7,7 @@ ipv6: false
 
 proxy-providers:
   vlv:
-    type: http
-    url: "__PROXY_SUB_URL__"
-    interval: 3600
+    type: file
     path: ./providers/vlv.yaml
     health-check:
       enable: true
