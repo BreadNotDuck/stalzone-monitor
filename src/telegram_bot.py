@@ -17,7 +17,7 @@ from .artifact_meta import (
     quality_labels,
 )
 from .catalog import CatalogItem, ItemCatalog
-from .charts import format_history_chart
+from .charts import format_history_caption, render_history_chart_png
 from .config import ItemWatch, load_settings
 from .menu import _build_monitor
 from .notifier import escape_html
@@ -910,21 +910,52 @@ class TelegramBotApp:
                 median = int(statistics.median(prices))
             elif prices:
                 median = int(sum(prices) / len(prices))
-            text = format_history_chart(
+
+            q_label = quality_label(quality) if quality is not None else None
+            p_label = potential_label(potential) if potential is not None else None
+            caption = format_history_caption(
+                item_name=name,
+                prices=prices,
+                median=median,
+                quality_label=q_label,
+                potential_label=p_label,
+            )
+            if not prices:
+                self._api("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": caption,
+                    "parse_mode": "HTML",
+                })
+                return
+
+            png = render_history_chart_png(
                 item_name=name,
                 prices=prices,
                 times=times,
                 median=median,
-                quality_label=quality_label(quality) if quality is not None else None,
-                potential_label=potential_label(potential) if potential is not None else None,
+                quality_label=q_label,
+                potential_label=p_label,
             )
-            self._api("sendMessage", {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-            })
+            self._send_photo(chat_id, png, caption=caption)
         except Exception as exc:
             self._send(chat_id, f"❌ Не удалось построить график: {escape_html(str(exc))}")
+
+    def _send_photo(self, chat_id: str, png: bytes, *, caption: str) -> None:
+        try:
+            response = requests.post(
+                f"{self.base_url}/sendPhoto",
+                data={
+                    "chat_id": chat_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                },
+                files={"photo": ("median.png", png, "image/png")},
+                timeout=(20, 90),
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"[BOT] sendPhoto failed: {exc}")
+            self._send(chat_id, caption)
 
     def _reset_seen(self, chat_id: str) -> None:
         try:
