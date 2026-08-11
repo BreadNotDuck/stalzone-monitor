@@ -1,5 +1,6 @@
 .env
 deploy/remote.env
+deploy/mihomo/runtime/
 .venv/
 venv/
 __pycache__/

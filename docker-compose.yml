@@ -1,17 +1,10 @@
 services:
   proxy:
-    image: metacubex/mihomo:v1.19.15
+    image: metacubex/mihomo:v1.19.29
     container_name: stalzone-proxy
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      TZ: ${TZ:-Europe/Moscow}
-      PROXY_SUB_URL: ${PROXY_SUB_URL:-}
     volumes:
-      - ./deploy/mihomo:/config:ro
-      - proxy-data:/root/.config/mihomo
-    entrypoint: ["/bin/sh", "/config/entrypoint.sh"]
+      - ./deploy/mihomo/runtime:/root/.config/mihomo
     ports:
       - "127.0.0.1:7890:7890"
     logging:
@@ -46,5 +39,3 @@ services:
 volumes:
   monitor-data:
     name: stalzone-monitor-data
-  proxy-data:
-    name: stalzone-proxy-data

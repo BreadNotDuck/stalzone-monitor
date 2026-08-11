@@ -23,7 +23,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env"
+          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env,!deploy/mihomo/runtime"
           target: ${{ secrets.VPS_APP_DIR }}
           overwrite: true
           strip_components: 0
@@ -56,13 +56,11 @@ jobs:
               exit 1
             fi
 
-            # VPN subscription: отдельный секрет или уже внутри ENV_FILE
             if [ -n "${PROXY_SUB_URL:-}" ]; then
               sed -i '/^PROXY_SUB_URL=/d' .env || true
               printf 'PROXY_SUB_URL=%s\n' "$PROXY_SUB_URL" >> .env
             fi
 
-            # Гарантируем, что бот ходит в Telegram через mihomo
             sed -i '/^HTTPS_PROXY=/d;/^HTTP_PROXY=/d;/^NO_PROXY=/d' .env || true
             printf '%s\n' \
               'HTTPS_PROXY=http://proxy:7890' \
@@ -70,18 +68,21 @@ jobs:
               'NO_PROXY=localhost,127.0.0.1,proxy' >> .env
 
             if ! grep -q '^PROXY_SUB_URL=.\+' .env; then
-              echo "::error::PROXY_SUB_URL не задан. Добавь GitHub secret PROXY_SUB_URL (ссылка VPN-подписки)."
+              echo "::error::PROXY_SUB_URL не задан. Добавь GitHub secret PROXY_SUB_URL."
               exit 1
             fi
 
             mkdir -p data
-            chmod +x deploy/healthcheck.sh deploy/up.sh deploy/mihomo/entrypoint.sh || true
+            chmod +x deploy/healthcheck.sh deploy/up.sh deploy/mihomo/render-config.sh || true
+            bash deploy/mihomo/render-config.sh "$APP_DIR/.env"
 
             if ! command -v docker >/dev/null; then
               curl -fsSL https://get.docker.com | sh
             fi
 
             docker compose pull proxy || true
-            docker compose up -d --build
-            sleep 8
+            docker compose up -d --build --force-recreate
+            sleep 5
+            docker compose ps -a || true
+            docker compose logs --tail 50 proxy || true
             bash deploy/healthcheck.sh "$APP_DIR"
