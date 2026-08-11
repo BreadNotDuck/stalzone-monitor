@@ -9,6 +9,8 @@ from pathlib import Path
 from .artifact_meta import ALL_ARTIFACT_QUALITIES, DEFAULT_ARTIFACT_QUALITIES
 
 DEFAULT_ABOVE_REFERENCE_PERCENT = 5.0
+DEFAULT_MIN_PROFIT_PERCENT = 10.0
+DEFAULT_MIN_PROFIT_AMOUNT = 0
 
 LOT_CATEGORIES = ("artifacts", "module_cores", "weapons", "armor", "containers")
 QUALITY_LOT_CATEGORIES = ("artifacts", "module_cores")
@@ -44,13 +46,22 @@ class Subscriber:
         return f"истекла {self.expires_at.astimezone().strftime('%d.%m.%Y %H:%M')}"
 
 
-ADJUSTMENTS: dict[str, int] = {
-    "+7": 7,
-    "-7": -7,
-    "+30": 30,
-    "-30": -30,
-    "+90": 90,
-    "-90": -90,
+# key -> (days, hours)
+ADJUSTMENTS: dict[str, tuple[int, int]] = {
+    "+1h": (0, 1),
+    "-1h": (0, -1),
+    "+6h": (0, 6),
+    "-6h": (0, -6),
+    "+12h": (0, 12),
+    "-12h": (0, -12),
+    "+1": (1, 0),
+    "-1": (-1, 0),
+    "+7": (7, 0),
+    "-7": (-7, 0),
+    "+30": (30, 0),
+    "-30": (-30, 0),
+    "+90": (90, 0),
+    "-90": (-90, 0),
 }
 
 
@@ -100,6 +111,10 @@ class SubscriptionsStore:
                 )
             if "enabled_core_qualities" not in columns:
                 conn.execute("ALTER TABLE subscribers ADD COLUMN enabled_core_qualities TEXT")
+            if "min_profit_percent" not in columns:
+                conn.execute("ALTER TABLE subscribers ADD COLUMN min_profit_percent REAL")
+            if "min_profit_amount" not in columns:
+                conn.execute("ALTER TABLE subscribers ADD COLUMN min_profit_amount INTEGER")
 
     @staticmethod
     def _parse_dt(value: str | None) -> datetime | None:
@@ -219,6 +234,60 @@ class SubscriptionsStore:
         current = self.get_above_reference_percent(chat_id)
         return self.set_above_reference_percent(chat_id, current + delta)
 
+    def get_min_profit_percent(
+        self, chat_id: str, default: float = DEFAULT_MIN_PROFIT_PERCENT
+    ) -> float:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT min_profit_percent FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return float(row[0])
+
+    def set_min_profit_percent(self, chat_id: str, value: float) -> float:
+        self.upsert_user(chat_id)
+        clamped = max(0.0, min(80.0, float(value)))
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET min_profit_percent = ? WHERE chat_id = ?",
+                    (clamped, chat_id),
+                )
+        return clamped
+
+    def adjust_min_profit_percent(self, chat_id: str, delta: float) -> float:
+        return self.set_min_profit_percent(chat_id, self.get_min_profit_percent(chat_id) + delta)
+
+    def get_min_profit_amount(
+        self, chat_id: str, default: int = DEFAULT_MIN_PROFIT_AMOUNT
+    ) -> int:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT min_profit_amount FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return int(row[0])
+
+    def set_min_profit_amount(self, chat_id: str, value: int) -> int:
+        self.upsert_user(chat_id)
+        clamped = max(0, min(50_000_000, int(value)))
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET min_profit_amount = ? WHERE chat_id = ?",
+                    (clamped, chat_id),
+                )
+        return clamped
+
+    def adjust_min_profit_amount(self, chat_id: str, delta: int) -> int:
+        return self.set_min_profit_amount(chat_id, self.get_min_profit_amount(chat_id) + delta)
+
     def get_lot_categories(self, chat_id: str) -> dict[str, bool]:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -335,10 +404,11 @@ class SubscriptionsStore:
                         INSERT INTO subscribers (
                             chat_id, username, display_name, expires_at, created_at,
                             enabled_qualities, enabled_core_qualities, above_reference_percent,
+                            min_profit_percent, min_profit_amount,
                             watch_artifacts, watch_module_cores, watch_weapons, watch_armor,
                             watch_containers, notifications_enabled
                         )
-                        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             chat_id,
@@ -348,6 +418,8 @@ class SubscriptionsStore:
                             self._format_qualities(DEFAULT_ARTIFACT_QUALITIES),
                             self._format_qualities(DEFAULT_ARTIFACT_QUALITIES),
                             DEFAULT_ABOVE_REFERENCE_PERCENT,
+                            DEFAULT_MIN_PROFIT_PERCENT,
+                            DEFAULT_MIN_PROFIT_AMOUNT,
                             1,
                             0,
                             0,
@@ -392,14 +464,14 @@ class SubscriptionsStore:
                 ).fetchall()
         return [str(row[0]) for row in rows]
 
-    def adjust(self, chat_id: str, days: int) -> Subscriber:
+    def adjust(self, chat_id: str, days: int = 0, hours: int = 0) -> Subscriber:
         subscriber = self.get(chat_id)
         if subscriber is None:
             raise ValueError("Пользователь не найден")
 
         now = datetime.now(timezone.utc)
         base = subscriber.expires_at if subscriber.expires_at and subscriber.expires_at > now else now
-        new_expires = base + timedelta(days=days)
+        new_expires = base + timedelta(days=days, hours=hours)
 
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -414,10 +486,30 @@ class SubscriptionsStore:
                 ).fetchone()
         return self._row_to_subscriber(row)
 
+    def clear_subscription(self, chat_id: str) -> Subscriber:
+        subscriber = self.get(chat_id)
+        if subscriber is None:
+            raise ValueError("Пользователь не найден")
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET expires_at = NULL WHERE chat_id = ?",
+                    (chat_id,),
+                )
+                row = conn.execute(
+                    "SELECT chat_id, username, display_name, expires_at, created_at "
+                    "FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        return self._row_to_subscriber(row)
+
     def adjust_key(self, chat_id: str, key: str) -> Subscriber:
+        if key == "zero":
+            return self.clear_subscription(chat_id)
         if key not in ADJUSTMENTS:
             raise ValueError(f"Неизвестный период: {key}")
-        return self.adjust(chat_id, ADJUSTMENTS[key])
+        days, hours = ADJUSTMENTS[key]
+        return self.adjust(chat_id, days=days, hours=hours)
 
     def display_name(self, subscriber: Subscriber) -> str:
         if subscriber.username:

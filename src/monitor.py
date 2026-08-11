@@ -16,7 +16,7 @@ from .artifact_meta import (
 )
 from .catalog import CatalogItem, ItemCatalog
 from .config import ItemWatch, Settings, load_settings
-from .notifier import TelegramNotifier, format_deal_message
+from .notifier import TelegramNotifier, deal_history_keyboard, format_deal_message
 from .storage import SeenLotsStore
 from .subscriptions import SubscriptionsStore
 
@@ -43,6 +43,7 @@ class SaleReference:
     price: int
     count: int
     level: str  # full (3+), low (1-2), none
+    prices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class DealCandidate:
     potential: int | None
     confidence: str  # confirmed | partial | preliminary
     item_category: str = "artifacts"
+    history_prices: tuple[int, ...] = ()
 
 
 class AuctionMonitor:
@@ -541,9 +543,9 @@ class AuctionMonitor:
             and entry.potential == potential
         ]
         if len(prices) >= 3:
-            return SaleReference(int(statistics.median(prices)), len(prices), "full")
+            return SaleReference(int(statistics.median(prices)), len(prices), "full", tuple(prices))
         if len(prices) >= 1:
-            return SaleReference(int(statistics.mean(prices)), len(prices), "low")
+            return SaleReference(int(statistics.mean(prices)), len(prices), "low", tuple(prices))
         return None
 
     def _sale_reference_by_quality(
@@ -562,9 +564,9 @@ class AuctionMonitor:
             if entry.price > 0 and entry.quality == quality
         ]
         if len(prices) >= 3:
-            return SaleReference(int(statistics.median(prices)), len(prices), "full")
+            return SaleReference(int(statistics.median(prices)), len(prices), "full", tuple(prices))
         if len(prices) >= 1:
-            return SaleReference(int(statistics.mean(prices)), len(prices), "low")
+            return SaleReference(int(statistics.mean(prices)), len(prices), "low", tuple(prices))
         return None
 
     def _find_cheapest_deal(
@@ -650,6 +652,7 @@ class AuctionMonitor:
             potential=cheapest.potential,
             confidence=confidence,
             item_category=item_category,
+            history_prices=sale_ref.prices if sale_ref else (),
         )
 
     def _recipients_for_candidate(
@@ -710,7 +713,25 @@ class AuctionMonitor:
             return 0
 
         sent = 0
+        buyout = candidate.lot.buyout_price or 0
+        next_price = candidate.next_lot_price or 0
+        discount_vs_next = (
+            (1 - buyout / next_price) * 100 if next_price > 0 and buyout > 0 else 0.0
+        )
+        profit_gap = 0
+        if next_price > 0:
+            profit_gap = int(
+                round(next_price * (1 - self.settings.auction_fee_percent / 100)) - buyout
+            )
+
         for target in recipients:
+            if self.subs_store:
+                min_pct = self.subs_store.get_min_profit_percent(
+                    target, default=self.settings.default_discount_percent
+                )
+                min_amount = self.subs_store.get_min_profit_amount(target, default=0)
+                if discount_vs_next < min_pct or profit_gap < min_amount:
+                    continue
             if not self.store.try_claim(
                 lot_key, target, item.id, candidate.lot.buyout_price or 0
             ):
@@ -738,8 +759,14 @@ class AuctionMonitor:
                 auction_fee_percent=self.settings.auction_fee_percent,
                 next_lot_reference_percent=self.settings.next_lot_reference_percent,
                 above_reference_percent=threshold,
+                history_prices=list(candidate.history_prices) or None,
             )
-            if self.notifier.send(personal_message, chat_id=target):
+            markup = deal_history_keyboard(
+                item_id=item.id,
+                quality=candidate.quality,
+                potential=candidate.potential,
+            )
+            if self.notifier.send(personal_message, chat_id=target, reply_markup=markup):
                 sent += 1
             else:
                 self.store.unclaim(lot_key, target)

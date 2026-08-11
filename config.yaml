@@ -20,7 +20,7 @@ artifact_potentials:
 - 15
 catalog_realm: ru
 defaults:
-  discount_percent: 10
+  discount_percent: 5  # нижний порог сканера; личные фильтры — в «📊 Порог»
   above_reference_percent: 5  # «дороже ориентира» — от +5% и выше
   next_lot_reference_percent: 1
   auction_fee_percent: 6

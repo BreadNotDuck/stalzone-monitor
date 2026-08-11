@@ -6,6 +6,8 @@ from typing import Any
 
 import requests
 
+from .charts import sparkline
+
 
 class TelegramNotifier:
     def __init__(self, bot_token: str | None, chat_id: str | None) -> None:
@@ -16,22 +18,32 @@ class TelegramNotifier:
     def enabled(self) -> bool:
         return bool(self.bot_token and self.chat_id)
 
-    def send(self, text: str, *, chat_id: str | None = None) -> bool:
+    def send(
+        self,
+        text: str,
+        *,
+        chat_id: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
         target = chat_id or self.chat_id
         if not self.bot_token or not target:
             print(f"[DEV TELEGRAM]\n{text}")
             return True
 
+        payload: dict[str, Any] = {
+            "chat_id": target,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+
         for attempt in range(3):
             try:
                 response = requests.post(
                     f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-                    json={
-                        "chat_id": target,
-                        "text": text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    },
+                    json=payload,
                     timeout=(15, 60),
                 )
                 response.raise_for_status()
@@ -70,6 +82,7 @@ def format_deal_message(
     auction_fee_percent: float = 6,
     next_lot_reference_percent: float = 1,
     above_reference_percent: float = 5,
+    history_prices: list[int] | None = None,
 ) -> str:
     from .artifact_meta import potential_label, quality_emoji, quality_label
 
@@ -124,8 +137,31 @@ def format_deal_message(
     if amount > 1:
         lines.append(f"📦 ×{amount}")
 
+    if history_prices and len(history_prices) >= 2:
+        lines.append(f"📊 <code>{sparkline(history_prices)}</code>")
+
     return "\n".join(lines)
 
 
 def escape_html(text: str) -> str:
     return html.escape(text)
+
+
+def deal_history_keyboard(
+    *,
+    item_id: str,
+    quality: int | None,
+    potential: int | None,
+) -> dict[str, Any]:
+    q = quality if quality is not None else -1
+    p = potential if potential is not None else -1
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📈 Медиана продаж",
+                    "callback_data": f"hist:{item_id}:{q}:{p}",
+                }
+            ]
+        ]
+    }

@@ -8,8 +8,16 @@ from typing import Any
 
 import requests
 
-from .artifact_meta import ALL_ARTIFACT_QUALITIES, potential_labels, quality_emoji, quality_label, quality_labels
+from .artifact_meta import (
+    ALL_ARTIFACT_QUALITIES,
+    potential_label,
+    potential_labels,
+    quality_emoji,
+    quality_label,
+    quality_labels,
+)
 from .catalog import CatalogItem, ItemCatalog
+from .charts import format_history_chart
 from .config import ItemWatch, load_settings
 from .menu import _build_monitor
 from .notifier import escape_html
@@ -297,6 +305,9 @@ class TelegramBotApp:
             return
 
         if data.startswith("uthr:"):
+            if data == "uthr:noop":
+                self._answer_callback(callback_id, "Выбери значение ниже")
+                return
             if not self._is_admin(chat_id):
                 subscriber = self.subs.get(chat_id)
                 if subscriber is None or not subscriber.is_active:
@@ -308,10 +319,66 @@ class TelegramBotApp:
                     value = self.subs.set_above_reference_percent(chat_id, float(action[4:]))
                 else:
                     value = self.subs.adjust_above_reference_percent(chat_id, float(action))
-                self._answer_callback(callback_id, f"Порог: {value:g}%")
+                self._answer_callback(callback_id, f"⚠️ порог: {value:g}%")
                 self._edit_threshold_keyboard(chat_id, message_id)
             except ValueError as exc:
                 self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("upft:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            action = data[5:]
+            try:
+                if action.startswith("set:"):
+                    value = self.subs.set_min_profit_percent(chat_id, float(action[4:]))
+                else:
+                    value = self.subs.adjust_min_profit_percent(chat_id, float(action))
+                self._answer_callback(callback_id, f"Мин %: {value:g}")
+                self._edit_threshold_keyboard(chat_id, message_id)
+            except ValueError as exc:
+                self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("upfa:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            action = data[5:]
+            try:
+                if action.startswith("set:"):
+                    value = self.subs.set_min_profit_amount(chat_id, int(float(action[4:])))
+                else:
+                    value = self.subs.adjust_min_profit_amount(chat_id, int(float(action)))
+                self._answer_callback(callback_id, f"Мин ₽: {value:,}".replace(",", " "))
+                self._edit_threshold_keyboard(chat_id, message_id)
+            except ValueError as exc:
+                self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("hist:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            # hist:{item_id}:{q}:{p}
+            parts = data.split(":")
+            if len(parts) < 4:
+                self._answer_callback(callback_id, "Битые данные")
+                return
+            item_id = parts[1]
+            quality = int(parts[2])
+            potential = int(parts[3])
+            q = None if quality < 0 else quality
+            p = None if potential < 0 else potential
+            self._answer_callback(callback_id, "Строю график…")
+            self._send_history_chart(chat_id, item_id, quality=q, potential=p)
             return
 
         if not self._is_admin(chat_id):
@@ -339,6 +406,8 @@ class TelegramBotApp:
                         user_id,
                         f"✅ Подписка обновлена: {escape_html(subscriber.status_label())}",
                     )
+                elif key == "zero":
+                    self._send(user_id, "❌ Подписка снята.")
             except ValueError as exc:
                 self._answer_callback(callback_id, str(exc))
             return
@@ -429,16 +498,27 @@ class TelegramBotApp:
     def _subscription_adjust_keyboard(self, user_id: str) -> list[list[dict[str, str]]]:
         return [
             [
-                {"text": "+1 нед", "callback_data": f"subadj:{user_id}:+7"},
-                {"text": "−1 нед", "callback_data": f"subadj:{user_id}:-7"},
+                {"text": "+1ч", "callback_data": f"subadj:{user_id}:+1h"},
+                {"text": "−1ч", "callback_data": f"subadj:{user_id}:-1h"},
+                {"text": "+6ч", "callback_data": f"subadj:{user_id}:+6h"},
+                {"text": "−6ч", "callback_data": f"subadj:{user_id}:-6h"},
             ],
             [
+                {"text": "+12ч", "callback_data": f"subadj:{user_id}:+12h"},
+                {"text": "−12ч", "callback_data": f"subadj:{user_id}:-12h"},
+                {"text": "+1д", "callback_data": f"subadj:{user_id}:+1"},
+                {"text": "−1д", "callback_data": f"subadj:{user_id}:-1"},
+            ],
+            [
+                {"text": "+1 нед", "callback_data": f"subadj:{user_id}:+7"},
+                {"text": "−1 нед", "callback_data": f"subadj:{user_id}:-7"},
                 {"text": "+1 мес", "callback_data": f"subadj:{user_id}:+30"},
                 {"text": "−1 мес", "callback_data": f"subadj:{user_id}:-30"},
             ],
             [
                 {"text": "+3 мес", "callback_data": f"subadj:{user_id}:+90"},
                 {"text": "−3 мес", "callback_data": f"subadj:{user_id}:-90"},
+                {"text": "🗑 Обнулить", "callback_data": f"subadj:{user_id}:zero"},
             ],
         ]
 
@@ -721,18 +801,50 @@ class TelegramBotApp:
         return keyboard
 
     def _threshold_text(self, user_chat_id: str) -> str:
-        value = self.subs.get_above_reference_percent(user_chat_id)
-        label = f"{value:g}".replace(".", ",")
+        warn = self.subs.get_above_reference_percent(user_chat_id)
+        min_pct = self.subs.get_min_profit_percent(user_chat_id)
+        min_sum = self.subs.get_min_profit_amount(user_chat_id)
+        warn_l = f"{warn:g}".replace(".", ",")
+        pct_l = f"{min_pct:g}".replace(".", ",")
         return (
-            "<b>Порог «дороже ориентира»</b>\n"
-            f"Сейчас: <b>+{label}%</b>\n\n"
-            "Предупреждение ⚠️ показывается, если лот дороже медианы/ориентира "
-            f"на <b>+{label}%</b> и больше.\n"
-            "Строка «ниже ориентира» показывается всегда."
+            "<b>📊 Пороги уведомлений</b>\n\n"
+            f"<b>1) Мин. прибыль %</b> (к след. лоту): <b>{pct_l}%</b>\n"
+            "Лот придёт, только если дешевле следующего минимум на этот %.\n\n"
+            f"<b>2) Мин. прибыль ₽</b> (после комиссии): <b>{min_sum:,} ₽</b>\n".replace(",", " ")
+            + "Лот придёт, только если «выгода» ≥ этой суммы.\n\n"
+            f"<b>3) Предупреждение ⚠️</b>: от <b>+{warn_l}%</b> дороже медианы.\n"
+            "Нажми блок ниже, чтобы менять значения."
         )
 
     def _threshold_keyboard(self) -> list[list[dict[str, str]]]:
         return [
+            [{"text": "— Мин. прибыль % —", "callback_data": "uthr:noop"}],
+            [
+                {"text": "−5%", "callback_data": "upft:-5"},
+                {"text": "−1%", "callback_data": "upft:-1"},
+                {"text": "+1%", "callback_data": "upft:1"},
+                {"text": "+5%", "callback_data": "upft:5"},
+            ],
+            [
+                {"text": "5%", "callback_data": "upft:set:5"},
+                {"text": "10%", "callback_data": "upft:set:10"},
+                {"text": "15%", "callback_data": "upft:set:15"},
+                {"text": "20%", "callback_data": "upft:set:20"},
+            ],
+            [{"text": "— Мин. прибыль ₽ —", "callback_data": "uthr:noop"}],
+            [
+                {"text": "−10к", "callback_data": "upfa:-10000"},
+                {"text": "−1к", "callback_data": "upfa:-1000"},
+                {"text": "+1к", "callback_data": "upfa:1000"},
+                {"text": "+10к", "callback_data": "upfa:10000"},
+            ],
+            [
+                {"text": "0", "callback_data": "upfa:set:0"},
+                {"text": "5к", "callback_data": "upfa:set:5000"},
+                {"text": "25к", "callback_data": "upfa:set:25000"},
+                {"text": "100к", "callback_data": "upfa:set:100000"},
+            ],
+            [{"text": "— ⚠️ Дороже ориентира —", "callback_data": "uthr:noop"}],
             [
                 {"text": "−5%", "callback_data": "uthr:-5"},
                 {"text": "−1%", "callback_data": "uthr:-1"},
@@ -765,6 +877,55 @@ class TelegramBotApp:
             "reply_markup": {"inline_keyboard": self._threshold_keyboard()},
         })
 
+    def _send_history_chart(
+        self,
+        chat_id: str,
+        item_id: str,
+        *,
+        quality: int | None,
+        potential: int | None,
+    ) -> None:
+        try:
+            monitor = _build_monitor(self.config_path)
+            history = monitor.client.get_price_history(item_id, limit=100, with_additional=True)
+            entries = []
+            for entry in history:
+                if entry.price <= 0:
+                    continue
+                if quality is not None and entry.quality != quality:
+                    continue
+                if potential is not None and entry.potential != potential:
+                    continue
+                entries.append(entry)
+            # История обычно приходит от новых к старым — для графика нужна хронология
+            entries = list(reversed(entries))
+            prices = [e.price for e in entries]
+            times = [e.time for e in entries]
+            found = self.catalog.find_by_id(item_id)
+            name = found.name if found else item_id
+            median = None
+            if len(prices) >= 3:
+                import statistics
+
+                median = int(statistics.median(prices))
+            elif prices:
+                median = int(sum(prices) / len(prices))
+            text = format_history_chart(
+                item_name=name,
+                prices=prices,
+                times=times,
+                median=median,
+                quality_label=quality_label(quality) if quality is not None else None,
+                potential_label=potential_label(potential) if potential is not None else None,
+            )
+            self._api("sendMessage", {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            })
+        except Exception as exc:
+            self._send(chat_id, f"❌ Не удалось построить график: {escape_html(str(exc))}")
+
     def _reset_seen(self, chat_id: str) -> None:
         try:
             monitor = _build_monitor(self.config_path)
@@ -796,6 +957,9 @@ class TelegramBotApp:
         my_core_qualities = quality_labels(list(self.subs.get_enabled_core_qualities(chat_id)))
         threshold = self.subs.get_above_reference_percent(chat_id)
         threshold_label = f"{threshold:g}".replace(".", ",")
+        min_pct = self.subs.get_min_profit_percent(chat_id)
+        min_pct_label = f"{min_pct:g}".replace(".", ",")
+        min_sum = self.subs.get_min_profit_amount(chat_id)
         lot_prefs = self.subs.get_lot_categories(chat_id)
         notify_on = self.subs.is_notifications_enabled(chat_id)
         lot_lines = []
@@ -825,6 +989,7 @@ class TelegramBotApp:
             f"<b>Личные уведомления:</b> {'🔔 вкл' if notify_on else '🔕 выкл'}",
             "<b>Твои категории (📦 Лоты):</b>",
             *lot_lines,
+            f"  Мин. прибыль: {min_pct_label}% / {min_sum:,} ₽".replace(",", " "),
             f"  Порог «дороже ориентира»: +{threshold_label}%",
             f"  Заточки: {potentials}",
             "  Уведомление: ≥10% ниже следующего лота",

@@ -23,7 +23,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env,!deploy/mihomo/runtime"
+          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env,!deploy/mihomo/runtime,!config.yaml"
           target: ${{ secrets.VPS_APP_DIR }}
           overwrite: true
           strip_components: 0
