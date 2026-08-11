@@ -84,6 +84,7 @@ class TelegramBotApp:
 
     def run(self) -> None:
         print("Telegram-бот запущен. Управление через меню в чате.")
+        self._ensure_telegram_reachable()
         settings = load_settings(self.config_path)
         self._send_menu(
             self.admin_chat_id,
@@ -109,6 +110,26 @@ class TelegramBotApp:
             except requests.RequestException as exc:
                 print(f"[BOT] ошибка polling: {exc}")
                 time.sleep(3)
+
+    def _ensure_telegram_reachable(self) -> None:
+        """Падаем сразу, если api.telegram.org недоступен или токен битый."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/getMe",
+                timeout=(10, 30),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise SystemExit(
+                f"Telegram API недоступен с этой машины: {exc}. "
+                "Добавь рабочий HTTPS_PROXY в .env / секрет ENV_FILE."
+            ) from exc
+
+        if not payload.get("ok"):
+            raise SystemExit(f"Telegram getMe failed: {payload}")
+        username = payload.get("result", {}).get("username", "?")
+        print(f"[BOT] Telegram OK (@{username})")
 
     def _get_updates(self) -> list[dict[str, Any]]:
         response = requests.get(

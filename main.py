@@ -61,6 +61,14 @@ def main() -> int:
         run_telegram_bot(args.config)
     except ValueError as exc:
         print(f"Telegram не настроен: {exc}", file=sys.stderr)
+        # В Docker/без TTY меню зависает на input() — лучше упасть явно.
+        if not sys.stdin.isatty():
+            print(
+                "Нет интерактивного терминала: задай TELEGRAM_BOT_TOKEN и "
+                "TELEGRAM_CHAT_ID в .env (или секрете ENV_FILE).",
+                file=sys.stderr,
+            )
+            return 1
         print("Запускаю консольное меню...", file=sys.stderr)
         from src.menu import run_menu
 
