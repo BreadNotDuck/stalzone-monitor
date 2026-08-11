@@ -16,21 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build mihomo config from subscription
-        env:
-          PROXY_SUB_URL: ${{ secrets.PROXY_SUB_URL }}
-        run: |
-          set -euo pipefail
-          if [ -z "${PROXY_SUB_URL:-}" ]; then
-            echo "::error::GitHub secret PROXY_SUB_URL пустой"
-            exit 1
-          fi
-          python3 deploy/mihomo/build_config.py \
-            --url "$PROXY_SUB_URL" \
-            --out deploy/mihomo/runtime/config.yaml
-          sed -i 's/\r$//' deploy/healthcheck.sh deploy/mihomo/build_config.py || true
-          ls -la deploy/mihomo/runtime
-
       - name: Upload project to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -38,7 +23,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env"
+          source: ".,!.venv,!venv,!.git,!data,!__pycache__,!.pytest_cache,!deploy/remote.env,!.env,!deploy/mihomo/runtime"
           target: ${{ secrets.VPS_APP_DIR }}
           overwrite: true
           strip_components: 0
@@ -70,17 +55,8 @@ jobs:
               exit 1
             fi
 
-            sed -i '/^HTTPS_PROXY=/d;/^HTTP_PROXY=/d;/^NO_PROXY=/d' .env || true
-            printf '%s\n' \
-              'HTTPS_PROXY=http://proxy:7890' \
-              'HTTP_PROXY=http://proxy:7890' \
-              'NO_PROXY=localhost,127.0.0.1,proxy' >> .env
-
-            if [ ! -f deploy/mihomo/runtime/config.yaml ]; then
-              echo "::error::Нет deploy/mihomo/runtime/config.yaml — шаг сборки подписки не попал на VPS"
-              ls -laR deploy/mihomo || true
-              exit 1
-            fi
+            # На зарубежном VPS прокси обычно не нужен — убираем, если вдруг остался от старого сервера
+            sed -i '/^HTTPS_PROXY=/d;/^HTTP_PROXY=/d;/^NO_PROXY=/d;/^PROXY_SUB_URL=/d' .env || true
 
             mkdir -p data
             sed -i 's/\r$//' deploy/healthcheck.sh || true
@@ -90,20 +66,8 @@ jobs:
               curl -fsSL https://get.docker.com | sh
             fi
 
-            docker compose pull proxy || true
-            if ! docker compose up -d --build --force-recreate; then
-              echo "::error::docker compose up failed"
-              docker compose ps -a || true
-              docker compose logs --tail 100 || true
-              exit 1
-            fi
-
-            sleep 8
+            docker compose up -d --build --force-recreate
+            sleep 5
             docker compose ps -a || true
-            docker compose logs --tail 100 proxy || true
-
-            if ! bash deploy/healthcheck.sh "$APP_DIR"; then
-              echo "::error::Healthcheck failed"
-              docker compose logs --tail 150 || true
-              exit 1
-            fi
+            docker compose logs --tail 80 || true
+            bash deploy/healthcheck.sh "$APP_DIR"

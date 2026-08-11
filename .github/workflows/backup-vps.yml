@@ -1,0 +1,60 @@
+name: Backup from VPS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Backup app data from current VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.VPS_APP_DIR }}"
+            mkdir -p /tmp/stalzone-backup
+            cd "$APP_DIR"
+
+            # config + env (без вывода в лог)
+            cp -a config.yaml /tmp/stalzone-backup/ 2>/dev/null || true
+            cp -a .env /tmp/stalzone-backup/ 2>/dev/null || true
+
+            # SQLite / data из docker volume
+            if docker volume inspect stalzone-monitor-data >/dev/null 2>&1; then
+              docker run --rm \
+                -v stalzone-monitor-data:/data:ro \
+                -v /tmp/stalzone-backup:/backup \
+                alpine:3.20 \
+                sh -c 'cp -a /data/. /backup/data/ 2>/dev/null || mkdir -p /backup/data'
+            else
+              mkdir -p /tmp/stalzone-backup/data
+              cp -a data/. /tmp/stalzone-backup/data/ 2>/dev/null || true
+            fi
+
+            tar -C /tmp/stalzone-backup -czf /tmp/stalzone-monitor-backup.tar.gz .
+            ls -lh /tmp/stalzone-monitor-backup.tar.gz
+            echo "BACKUP_READY"
+
+      - name: Download backup tarball
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: /tmp/stalzone-monitor-backup.tar.gz
+          target: backups/
+          overwrite: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stalzone-monitor-backup
+          path: backups/stalzone-monitor-backup.tar.gz
+          retention-days: 7

@@ -1,5 +1,29 @@
 services:
+  monitor:
+    build: .
+    image: stalzone-monitor:latest
+    container_name: stalzone-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - monitor-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Опционально: только если api.telegram.org с VPS недоступен.
+  # Поднимается при наличии deploy/mihomo/runtime/config.yaml
   proxy:
+    profiles: ["proxy"]
     image: metacubex/mihomo:v1.19.29
     container_name: stalzone-proxy
     restart: unless-stopped
@@ -12,29 +36,6 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
-
-  monitor:
-    build: .
-    image: stalzone-monitor:latest
-    container_name: stalzone-monitor
-    restart: unless-stopped
-    depends_on:
-      - proxy
-    env_file:
-      - .env
-    environment:
-      TZ: ${TZ:-Europe/Moscow}
-      HTTPS_PROXY: ${HTTPS_PROXY:-http://proxy:7890}
-      HTTP_PROXY: ${HTTP_PROXY:-http://proxy:7890}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,proxy}
-    volumes:
-      - ./config.yaml:/app/config.yaml
-      - monitor-data:/app/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 volumes:
   monitor-data:

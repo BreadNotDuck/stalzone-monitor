@@ -1,0 +1,73 @@
+name: Migrate old VPS -> new VPS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Backup on old VPS and copy to new VPS
+        env:
+          NEW_HOST: ${{ secrets.NEW_VPS_HOST }}
+          NEW_KEY: ${{ secrets.NEW_VPS_SSH_KEY }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          envs: NEW_HOST,NEW_KEY
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.VPS_APP_DIR }}"
+            if [ -z "${NEW_HOST:-}" ] || [ -z "${NEW_KEY:-}" ]; then
+              echo "::error::Добавь secrets NEW_VPS_HOST и NEW_VPS_SSH_KEY"
+              exit 1
+            fi
+
+            mkdir -p /tmp/stalzone-backup /root/.ssh
+            printf '%s\n' "$NEW_KEY" > /root/.ssh/new_vps_key
+            chmod 600 /root/.ssh/new_vps_key
+
+            cd "$APP_DIR"
+            cp -a config.yaml /tmp/stalzone-backup/ 2>/dev/null || true
+            cp -a .env /tmp/stalzone-backup/ 2>/dev/null || true
+            mkdir -p /tmp/stalzone-backup/data
+            if docker volume inspect stalzone-monitor-data >/dev/null 2>&1; then
+              docker run --rm \
+                -v stalzone-monitor-data:/data:ro \
+                -v /tmp/stalzone-backup/data:/backup \
+                alpine:3.20 \
+                sh -c 'cp -a /data/. /backup/ || true'
+            else
+              cp -a data/. /tmp/stalzone-backup/data/ 2>/dev/null || true
+            fi
+
+            tar -C /tmp/stalzone-backup -czf /tmp/stalzone-monitor-backup.tar.gz .
+            ls -lh /tmp/stalzone-monitor-backup.tar.gz
+
+            ssh -i /root/.ssh/new_vps_key -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+              "root@${NEW_HOST}" 'mkdir -p /opt/stalzone-monitor /tmp'
+            scp -i /root/.ssh/new_vps_key -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+              /tmp/stalzone-monitor-backup.tar.gz "root@${NEW_HOST}:/tmp/stalzone-monitor-backup.tar.gz"
+
+            ssh -i /root/.ssh/new_vps_key -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+              "root@${NEW_HOST}" 'set -euo pipefail
+                mkdir -p /opt/stalzone-monitor
+                tar -C /opt/stalzone-monitor -xzf /tmp/stalzone-monitor-backup.tar.gz
+                mkdir -p /opt/stalzone-monitor/data
+                if [ -d /opt/stalzone-monitor/data ] && command -v docker >/dev/null; then
+                  docker volume create stalzone-monitor-data >/dev/null || true
+                  docker run --rm \
+                    -v stalzone-monitor-data:/data \
+                    -v /opt/stalzone-monitor/data:/backup:ro \
+                    alpine:3.20 \
+                    sh -c "cp -a /backup/. /data/ || true"
+                fi
+                ls -la /opt/stalzone-monitor
+                echo MIGRATE_OK'
+
+            rm -f /root/.ssh/new_vps_key
+            echo "DONE"
