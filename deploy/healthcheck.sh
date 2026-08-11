@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Проверка, что контейнер жив и Telegram API доступен с сервера.
+# Проверка, что контейнер жив и Telegram API доступен с сервера (через прокси).
 set -euo pipefail
 
 APP_DIR="${1:-.}"
@@ -8,6 +8,12 @@ cd "$APP_DIR"
 echo "== docker compose ps =="
 docker compose ps -a || true
 
+if ! docker compose ps --status running 2>/dev/null | grep -q stalzone-proxy; then
+  echo "::error::Контейнер stalzone-proxy не running — без него Telegram с VPS не достучится"
+  docker compose logs --tail 80 proxy || true
+  exit 1
+fi
+
 if ! docker compose ps --status running 2>/dev/null | grep -q stalzone-monitor; then
   echo "::error::Контейнер stalzone-monitor не в статусе running"
   echo "== recent logs =="
@@ -15,8 +21,10 @@ if ! docker compose ps --status running 2>/dev/null | grep -q stalzone-monitor; 
   exit 1
 fi
 
-echo "== recent logs =="
-docker compose logs --tail 80 || true
+echo "== recent logs (proxy) =="
+docker compose logs --tail 40 proxy || true
+echo "== recent logs (monitor) =="
+docker compose logs --tail 80 monitor || true
 
 if [[ ! -f .env ]]; then
   echo "::error::Файл .env отсутствует на VPS"
@@ -34,22 +42,35 @@ if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   exit 1
 fi
 
-CURL=(curl -sS --max-time 25)
-if [[ -n "${HTTPS_PROXY:-}" ]]; then
-  CURL+=(-x "$HTTPS_PROXY")
-  echo "Прокси: HTTPS_PROXY задан"
-elif [[ -n "${HTTP_PROXY:-}" ]]; then
-  CURL+=(-x "$HTTP_PROXY")
-  echo "Прокси: HTTP_PROXY задан"
-else
-  echo "Прокси: не задан"
+if [[ -z "${PROXY_SUB_URL:-}" ]]; then
+  echo "::error::PROXY_SUB_URL пустой — добавь ссылку VPN-подписки в ENV_FILE"
+  exit 1
 fi
 
-echo "== ping api.telegram.org =="
-TG_HTTP="$("${CURL[@]}" -o /tmp/tg-root.body -w "%{http_code}" https://api.telegram.org/ || true)"
-echo "api.telegram.org HTTP=${TG_HTTP}"
-if [[ ! "$TG_HTTP" =~ ^[23] ]]; then
-  echo "::error::С VPS недоступен api.telegram.org (HTTP ${TG_HTTP:-000}). Нужен рабочий HTTPS_PROXY в секрете ENV_FILE."
+# С хоста ходим в прокси только на localhost (порт проброшен как 127.0.0.1:7890)
+PROXY_URL="${HTTPS_PROXY:-http://127.0.0.1:7890}"
+case "$PROXY_URL" in
+  *://proxy:*) PROXY_URL="http://127.0.0.1:7890" ;;
+esac
+
+CURL=(curl -sS --max-time 30 -x "$PROXY_URL")
+echo "Прокси для проверки: $PROXY_URL"
+
+echo "== wait for proxy / telegram =="
+OK=0
+for i in $(seq 1 36); do
+  TG_HTTP="$("${CURL[@]}" -o /tmp/tg-root.body -w "%{http_code}" https://api.telegram.org/ || true)"
+  echo "try $i: api.telegram.org HTTP=${TG_HTTP}"
+  if [[ "$TG_HTTP" =~ ^[23] ]]; then
+    OK=1
+    break
+  fi
+  sleep 5
+done
+
+if [[ "$OK" -ne 1 ]]; then
+  echo "::error::Через прокси api.telegram.org всё ещё недоступен. Проверь PROXY_SUB_URL / ноды VPN."
+  docker compose logs --tail 100 proxy || true
   exit 1
 fi
 
@@ -69,7 +90,6 @@ if ! grep -q '"ok":true' /tmp/tg-me.json; then
   exit 1
 fi
 
-# Пробуем доставить тестовое сообщение админу (если chat_id есть)
 if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   echo "== sendMessage smoke =="
   SEND_HTTP="$("${CURL[@]}" -o /tmp/tg-send.json -w "%{http_code}" \
@@ -81,7 +101,7 @@ if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   cat /tmp/tg-send.json || true
   echo
   if [[ "$SEND_HTTP" != "200" ]]; then
-    echo "::error::Контейнер есть, API жив, но sendMessage админу упал (HTTP ${SEND_HTTP}). Проверь TELEGRAM_CHAT_ID."
+    echo "::error::API жив, но sendMessage админу упал (HTTP ${SEND_HTTP}). Проверь TELEGRAM_CHAT_ID."
     exit 1
   fi
 fi

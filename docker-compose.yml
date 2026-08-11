@@ -1,16 +1,39 @@
 services:
-  monitor:
-    build: .
-    image: stalzone-monitor:latest
-    container_name: stalzone-monitor
+  proxy:
+    image: metacubex/mihomo:v1.19.15
+    container_name: stalzone-proxy
     restart: unless-stopped
     env_file:
       - .env
     environment:
       TZ: ${TZ:-Europe/Moscow}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-}
+      PROXY_SUB_URL: ${PROXY_SUB_URL:-}
+    volumes:
+      - ./deploy/mihomo:/config:ro
+      - proxy-data:/root/.config/mihomo
+    entrypoint: ["/bin/sh", "/config/entrypoint.sh"]
+    ports:
+      - "127.0.0.1:7890:7890"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  monitor:
+    build: .
+    image: stalzone-monitor:latest
+    container_name: stalzone-monitor
+    restart: unless-stopped
+    depends_on:
+      - proxy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      HTTPS_PROXY: ${HTTPS_PROXY:-http://proxy:7890}
+      HTTP_PROXY: ${HTTP_PROXY:-http://proxy:7890}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,proxy}
     volumes:
       - ./config.yaml:/app/config.yaml
       - monitor-data:/app/data
@@ -23,3 +46,5 @@ services:
 volumes:
   monitor-data:
     name: stalzone-monitor-data
+  proxy-data:
+    name: stalzone-proxy-data
