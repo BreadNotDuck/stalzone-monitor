@@ -115,6 +115,14 @@ class SubscriptionsStore:
                 conn.execute("ALTER TABLE subscribers ADD COLUMN min_profit_percent REAL")
             if "min_profit_amount" not in columns:
                 conn.execute("ALTER TABLE subscribers ADD COLUMN min_profit_amount INTEGER")
+            if "show_above_median" not in columns:
+                conn.execute(
+                    "ALTER TABLE subscribers ADD COLUMN show_above_median INTEGER NOT NULL DEFAULT 1"
+                )
+            if "chart_mode" not in columns:
+                conn.execute(
+                    "ALTER TABLE subscribers ADD COLUMN chart_mode TEXT NOT NULL DEFAULT 'png'"
+                )
 
     @staticmethod
     def _parse_dt(value: str | None) -> datetime | None:
@@ -221,7 +229,7 @@ class SubscriptionsStore:
 
     def set_above_reference_percent(self, chat_id: str, value: float) -> float:
         self.upsert_user(chat_id)
-        clamped = max(1.0, min(50.0, float(value)))
+        clamped = max(0.0, min(50.0, float(value)))
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -287,6 +295,54 @@ class SubscriptionsStore:
 
     def adjust_min_profit_amount(self, chat_id: str, delta: int) -> int:
         return self.set_min_profit_amount(chat_id, self.get_min_profit_amount(chat_id) + delta)
+
+    def get_show_above_median(self, chat_id: str, default: bool = True) -> bool:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT show_above_median FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return bool(row[0])
+
+    def set_show_above_median(self, chat_id: str, enabled: bool) -> bool:
+        self.upsert_user(chat_id)
+        value = 1 if enabled else 0
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET show_above_median = ? WHERE chat_id = ?",
+                    (value, chat_id),
+                )
+        return bool(value)
+
+    def toggle_show_above_median(self, chat_id: str) -> bool:
+        return self.set_show_above_median(chat_id, not self.get_show_above_median(chat_id))
+
+    def get_chart_mode(self, chat_id: str, default: str = "png") -> str:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT chart_mode FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or not row[0]:
+            return default
+        mode = str(row[0]).strip().lower()
+        return mode if mode in {"png", "text"} else default
+
+    def set_chart_mode(self, chat_id: str, mode: str) -> str:
+        self.upsert_user(chat_id)
+        normalized = "text" if str(mode).strip().lower() == "text" else "png"
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET chart_mode = ? WHERE chat_id = ?",
+                    (normalized, chat_id),
+                )
+        return normalized
 
     def get_lot_categories(self, chat_id: str) -> dict[str, bool]:
         with self._lock:

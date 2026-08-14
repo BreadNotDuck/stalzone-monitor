@@ -17,7 +17,7 @@ from .artifact_meta import (
     quality_labels,
 )
 from .catalog import CatalogItem, ItemCatalog
-from .charts import format_history_caption, render_history_chart_png
+from .charts import format_history_caption, format_history_chart, render_history_chart_png
 from .config import ItemWatch, load_settings
 from .menu import _build_monitor
 from .notifier import escape_html
@@ -66,10 +66,33 @@ LOT_NAV_BUTTONS = {
 }
 
 
+THRESHOLD_INPUT_MODES = frozenset({"thr_pct", "thr_amt", "thr_warn"})
+
+MENU_BUTTON_TEXTS = frozenset(
+    {
+        BTN_START,
+        BTN_STOP,
+        BTN_ONCE,
+        BTN_STATUS,
+        BTN_RESET,
+        BTN_LOTS,
+        BTN_THRESHOLD,
+        BTN_ADD,
+        BTN_REMOVE,
+        BTN_SUBS,
+        BTN_NOTIFY_ON,
+        BTN_NOTIFY_OFF,
+        "🚀 Мониторинг",
+        "📋 Список",
+    }
+)
+
+
 @dataclass
 class ChatState:
     mode: str | None = None
     search_results: list[CatalogItem] = field(default_factory=list)
+    threshold_message_id: int | None = None
 
 
 class TelegramBotApp:
@@ -114,9 +137,15 @@ class TelegramBotApp:
                 updates = self._get_updates()
                 for update in updates:
                     self.offset = update["update_id"] + 1
-                    self._handle_update(update)
+                    try:
+                        self._handle_update(update)
+                    except Exception as exc:
+                        print(f"[BOT] ошибка update: {exc}")
             except requests.RequestException as exc:
                 print(f"[BOT] ошибка polling: {exc}")
+                time.sleep(3)
+            except Exception as exc:
+                print(f"[BOT] критическая ошибка polling: {exc}")
                 time.sleep(3)
 
     def _ensure_telegram_reachable(self) -> None:
@@ -189,6 +218,9 @@ class TelegramBotApp:
             return
 
         state = self._state(chat_id)
+        if state.mode in THRESHOLD_INPUT_MODES and text not in MENU_BUTTON_TEXTS and not text.startswith("/"):
+            self._handle_threshold_custom_input(chat_id, text, state.mode)
+            return
         if state.mode == "add":
             if not is_admin:
                 state.mode = None
@@ -206,6 +238,10 @@ class TelegramBotApp:
         if state.mode == "admin_add_user" and is_admin:
             self._handle_admin_add_user(chat_id, text)
             return
+
+        if state.mode in THRESHOLD_INPUT_MODES:
+            state.mode = None
+            state.threshold_message_id = None
 
         handlers = {
             BTN_START: self._start_monitor,
@@ -304,27 +340,6 @@ class TelegramBotApp:
                 self._answer_callback(callback_id, str(exc))
             return
 
-        if data.startswith("uthr:"):
-            if data == "uthr:noop":
-                self._answer_callback(callback_id, "Выбери значение ниже")
-                return
-            if not self._is_admin(chat_id):
-                subscriber = self.subs.get(chat_id)
-                if subscriber is None or not subscriber.is_active:
-                    self._answer_callback(callback_id, "Нет активной подписки")
-                    return
-            action = data[5:]
-            try:
-                if action.startswith("set:"):
-                    value = self.subs.set_above_reference_percent(chat_id, float(action[4:]))
-                else:
-                    value = self.subs.adjust_above_reference_percent(chat_id, float(action))
-                self._answer_callback(callback_id, f"⚠️ порог: {value:g}%")
-                self._edit_threshold_keyboard(chat_id, message_id)
-            except ValueError as exc:
-                self._answer_callback(callback_id, str(exc))
-            return
-
         if data.startswith("upft:"):
             if not self._is_admin(chat_id):
                 subscriber = self.subs.get(chat_id)
@@ -333,10 +348,18 @@ class TelegramBotApp:
                     return
             action = data[5:]
             try:
+                if action == "custom":
+                    self._begin_threshold_custom(chat_id, message_id, "thr_pct")
+                    self._answer_callback(callback_id, "Введи свой %")
+                    return
                 if action.startswith("set:"):
                     value = self.subs.set_min_profit_percent(chat_id, float(action[4:]))
                 else:
-                    value = self.subs.adjust_min_profit_percent(chat_id, float(action))
+                    delta = float(action)
+                    if delta < 0:
+                        self._answer_callback(callback_id, "Порог не может быть < 0")
+                        return
+                    value = self.subs.adjust_min_profit_percent(chat_id, delta)
                 self._answer_callback(callback_id, f"Мин %: {value:g}")
                 self._edit_threshold_keyboard(chat_id, message_id)
             except ValueError as exc:
@@ -351,11 +374,62 @@ class TelegramBotApp:
                     return
             action = data[5:]
             try:
+                if action == "custom":
+                    self._begin_threshold_custom(chat_id, message_id, "thr_amt")
+                    self._answer_callback(callback_id, "Введи свою сумму")
+                    return
                 if action.startswith("set:"):
                     value = self.subs.set_min_profit_amount(chat_id, int(float(action[4:])))
                 else:
-                    value = self.subs.adjust_min_profit_amount(chat_id, int(float(action)))
+                    delta = int(float(action))
+                    if delta < 0:
+                        self._answer_callback(callback_id, "Порог не может быть < 0")
+                        return
+                    value = self.subs.adjust_min_profit_amount(chat_id, delta)
                 self._answer_callback(callback_id, f"Мин ₽: {value:,}".replace(",", " "))
+                self._edit_threshold_keyboard(chat_id, message_id)
+            except ValueError as exc:
+                self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("uthr:"):
+            if data == "uthr:noop":
+                self._answer_callback(callback_id, "Выбери значение ниже")
+                return
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            action = data[5:]
+            try:
+                if action == "custom":
+                    self._begin_threshold_custom(chat_id, message_id, "thr_warn")
+                    self._answer_callback(callback_id, "Введи свой %")
+                    return
+                if action == "toggle_above":
+                    enabled = self.subs.toggle_show_above_median(chat_id)
+                    self._answer_callback(
+                        callback_id,
+                        "Показ выше медианы: ВКЛ" if enabled else "Показ выше медианы: ВЫКЛ",
+                    )
+                    self._edit_threshold_keyboard(chat_id, message_id)
+                    return
+                if action.startswith("chart:"):
+                    mode = self.subs.set_chart_mode(chat_id, action[6:])
+                    label = "картинка" if mode == "png" else "текст"
+                    self._answer_callback(callback_id, f"График: {label}")
+                    self._edit_threshold_keyboard(chat_id, message_id)
+                    return
+                if action.startswith("set:"):
+                    value = self.subs.set_above_reference_percent(chat_id, float(action[4:]))
+                else:
+                    delta = float(action)
+                    if delta < 0:
+                        self._answer_callback(callback_id, "Порог не может быть < 0")
+                        return
+                    value = self.subs.adjust_above_reference_percent(chat_id, delta)
+                self._answer_callback(callback_id, f"Порог выше медианы: {value:g}%")
                 self._edit_threshold_keyboard(chat_id, message_id)
             except ValueError as exc:
                 self._answer_callback(callback_id, str(exc))
@@ -378,7 +452,12 @@ class TelegramBotApp:
             q = None if quality < 0 else quality
             p = None if potential < 0 else potential
             self._answer_callback(callback_id, "Строю график…")
-            self._send_history_chart(chat_id, item_id, quality=q, potential=p)
+            threading.Thread(
+                target=self._send_history_chart,
+                args=(chat_id, item_id),
+                kwargs={"quality": q, "potential": p},
+                daemon=True,
+            ).start()
             return
 
         if not self._is_admin(chat_id):
@@ -611,20 +690,30 @@ class TelegramBotApp:
         self._send(chat_id, "Останавливаю после текущего цикла...")
 
     def _run_once(self, chat_id: str) -> None:
-        self._send(chat_id, "🔍 Запускаю проверку...")
-        try:
-            monitor = _build_monitor(self.config_path)
-            result = monitor.run_once()
-            hint = ""
-            if result.notified == 0 and result.candidates > 0 and result.skipped_seen > 0:
-                hint = "\n\n💡 Есть кандидаты, но все уже были отправлены. Нажми 🔄 Сброс памяти."
-            elif result.notified == 0 and result.with_lots == 0:
-                hint = "\n\n💡 Нет лотов нужной редкости/заточки на аукционе."
-            elif result.notified == 0 and result.candidates == 0:
-                hint = "\n\n💡 Нет лотов на ≥10% дешевле следующего."
-            self._send_menu(chat_id, f"✅ {result.summary()}{hint}")
-        except Exception as exc:
-            self._send_menu(chat_id, f"❌ Ошибка: {escape_html(str(exc))}")
+        if getattr(self, "_once_running", False):
+            self._send(chat_id, "🔍 Проверка уже идёт, подожди.")
+            return
+
+        def worker() -> None:
+            self._once_running = True
+            self._send(chat_id, "🔍 Запускаю проверку...")
+            try:
+                monitor = _build_monitor(self.config_path)
+                result = monitor.run_once()
+                hint = ""
+                if result.notified == 0 and result.candidates > 0 and result.skipped_seen > 0:
+                    hint = "\n\n💡 Есть кандидаты, но все уже были отправлены. Нажми 🔄 Сброс памяти."
+                elif result.notified == 0 and result.with_lots == 0:
+                    hint = "\n\n💡 Нет лотов нужной редкости/заточки на аукционе."
+                elif result.notified == 0 and result.candidates == 0:
+                    hint = "\n\n💡 Нет лотов под твои пороги прибыли."
+                self._send_menu(chat_id, f"✅ {result.summary()}{hint}")
+            except Exception as exc:
+                self._send_menu(chat_id, f"❌ Ошибка: {escape_html(str(exc))}")
+            finally:
+                self._once_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _notify_button(self, chat_id: str) -> str:
         if self.subs.is_notifications_enabled(chat_id):
@@ -804,60 +893,160 @@ class TelegramBotApp:
         warn = self.subs.get_above_reference_percent(user_chat_id)
         min_pct = self.subs.get_min_profit_percent(user_chat_id)
         min_sum = self.subs.get_min_profit_amount(user_chat_id)
+        show_above = self.subs.get_show_above_median(user_chat_id)
+        chart_mode = self.subs.get_chart_mode(user_chat_id)
         warn_l = f"{warn:g}".replace(".", ",")
         pct_l = f"{min_pct:g}".replace(".", ",")
+        above_l = "вкл" if show_above else "выкл"
+        chart_l = "картинка PNG" if chart_mode == "png" else "текст"
         return (
             "<b>📊 Пороги уведомлений</b>\n\n"
             f"<b>1) Мин. прибыль %</b> (к след. лоту): <b>{pct_l}%</b>\n"
             "Лот придёт, только если дешевле следующего минимум на этот %.\n\n"
             f"<b>2) Мин. прибыль ₽</b> (после комиссии): <b>{min_sum:,} ₽</b>\n".replace(",", " ")
             + "Лот придёт, только если «выгода» ≥ этой суммы.\n\n"
-            f"<b>3) Предупреждение ⚠️</b>: от <b>+{warn_l}%</b> дороже медианы.\n"
-            "Нажми блок ниже, чтобы менять значения."
+            f"<b>3) Выше медианы</b>: порог <b>+{warn_l}%</b>, "
+            f"показ таких лотов: <b>{above_l}</b>\n"
+            "Если показ <b>выкл</b> — лоты дороже медианы на этот % и более "
+            "тебе не приходят.\n\n"
+            f"<b>4) График по кнопке</b>: <b>{chart_l}</b>\n"
+            "Все пороги только ≥ 0."
         )
 
-    def _threshold_keyboard(self) -> list[list[dict[str, str]]]:
+    def _threshold_keyboard(self, chat_id: str) -> list[list[dict[str, str]]]:
+        show_above = self.subs.get_show_above_median(chat_id)
+        chart_mode = self.subs.get_chart_mode(chat_id)
+        # вкл = показывать дорогие; выкл = скрывать (≥ порога)
+        above_btn = (
+            "🔔 Показ лотов выше медианы: ВКЛ"
+            if show_above
+            else "🔕 Показ лотов выше медианы: ВЫКЛ"
+        )
+        png_mark = "✅" if chart_mode == "png" else "⬜"
+        text_mark = "✅" if chart_mode == "text" else "⬜"
         return [
             [{"text": "— Мин. прибыль % —", "callback_data": "uthr:noop"}],
             [
-                {"text": "−5%", "callback_data": "upft:-5"},
-                {"text": "−1%", "callback_data": "upft:-1"},
-                {"text": "+1%", "callback_data": "upft:1"},
-                {"text": "+5%", "callback_data": "upft:5"},
-            ],
-            [
+                {"text": "0%", "callback_data": "upft:set:0"},
                 {"text": "5%", "callback_data": "upft:set:5"},
                 {"text": "10%", "callback_data": "upft:set:10"},
                 {"text": "15%", "callback_data": "upft:set:15"},
-                {"text": "20%", "callback_data": "upft:set:20"},
             ],
-            [{"text": "— Мин. прибыль ₽ —", "callback_data": "uthr:noop"}],
             [
-                {"text": "−10к", "callback_data": "upfa:-10000"},
-                {"text": "−1к", "callback_data": "upfa:-1000"},
-                {"text": "+1к", "callback_data": "upfa:1000"},
-                {"text": "+10к", "callback_data": "upfa:10000"},
+                {"text": "20%", "callback_data": "upft:set:20"},
+                {"text": "25%", "callback_data": "upft:set:25"},
+                {"text": "+1%", "callback_data": "upft:1"},
+                {"text": "+5%", "callback_data": "upft:5"},
             ],
+            [{"text": "✏️ Своё %", "callback_data": "upft:custom"}],
+            [{"text": "— Мин. прибыль ₽ —", "callback_data": "uthr:noop"}],
             [
                 {"text": "0", "callback_data": "upfa:set:0"},
                 {"text": "5к", "callback_data": "upfa:set:5000"},
                 {"text": "25к", "callback_data": "upfa:set:25000"},
                 {"text": "100к", "callback_data": "upfa:set:100000"},
             ],
-            [{"text": "— ⚠️ Дороже ориентира —", "callback_data": "uthr:noop"}],
             [
-                {"text": "−5%", "callback_data": "uthr:-5"},
-                {"text": "−1%", "callback_data": "uthr:-1"},
-                {"text": "+1%", "callback_data": "uthr:1"},
-                {"text": "+5%", "callback_data": "uthr:5"},
+                {"text": "+1к", "callback_data": "upfa:1000"},
+                {"text": "+5к", "callback_data": "upfa:5000"},
+                {"text": "+10к", "callback_data": "upfa:10000"},
+                {"text": "+50к", "callback_data": "upfa:50000"},
             ],
+            [{"text": "✏️ Своя ₽", "callback_data": "upfa:custom"}],
+            [{"text": "— Выше медианы —", "callback_data": "uthr:noop"}],
+            [{"text": above_btn, "callback_data": "uthr:toggle_above"}],
             [
-                {"text": "3%", "callback_data": "uthr:set:3"},
+                {"text": "0%", "callback_data": "uthr:set:0"},
                 {"text": "5%", "callback_data": "uthr:set:5"},
                 {"text": "10%", "callback_data": "uthr:set:10"},
                 {"text": "15%", "callback_data": "uthr:set:15"},
             ],
+            [
+                {"text": "+1%", "callback_data": "uthr:1"},
+                {"text": "+5%", "callback_data": "uthr:5"},
+                {"text": "✏️ Свой %", "callback_data": "uthr:custom"},
+            ],
+            [{"text": "— График по кнопке —", "callback_data": "uthr:noop"}],
+            [
+                {"text": f"{png_mark} Картинка", "callback_data": "uthr:chart:png"},
+                {"text": f"{text_mark} Текст", "callback_data": "uthr:chart:text"},
+            ],
         ]
+
+    def _begin_threshold_custom(self, chat_id: str, message_id: int, mode: str) -> None:
+        state = self._state(chat_id)
+        state.mode = mode
+        state.threshold_message_id = message_id
+        prompts = {
+            "thr_pct": (
+                "✏️ Введи <b>мин. прибыль %</b> числом.\n"
+                "Примеры: <code>7</code>, <code>12.5</code>, <code>8%</code>\n"
+                "Диапазон: 0–80."
+            ),
+            "thr_amt": (
+                "✏️ Введи <b>мин. прибыль ₽</b> числом.\n"
+                "Примеры: <code>3500</code>, <code>5к</code>, <code>12.5к</code>\n"
+                "Диапазон: 0–50 000 000."
+            ),
+            "thr_warn": (
+                "✏️ Введи порог <b>выше медианы %</b> числом.\n"
+                "Примеры: <code>0</code>, <code>4</code>, <code>7.5</code>\n"
+                "Диапазон: 0–50."
+            ),
+        }
+        self._send(chat_id, prompts[mode])
+
+    @staticmethod
+    def _parse_threshold_number(text: str, *, as_amount: bool = False) -> float:
+        raw = text.strip().lower().replace(" ", "").replace("\u00a0", "")
+        raw = raw.replace("%", "").replace("₽", "").replace("руб", "").replace("rur", "")
+        raw = raw.replace(",", ".")
+        multiplier = 1.0
+        if raw.endswith(("к", "k")):
+            multiplier = 1_000.0
+            raw = raw[:-1]
+        elif raw.endswith(("м", "m")):
+            multiplier = 1_000_000.0
+            raw = raw[:-1]
+        if not raw or raw in {".", "-", "+"}:
+            raise ValueError("Нужно число")
+        value = float(raw) * multiplier
+        if value < 0:
+            raise ValueError("Значение не может быть меньше 0")
+        if as_amount:
+            return float(int(round(value)))
+        return value
+
+    def _handle_threshold_custom_input(self, chat_id: str, text: str, mode: str) -> None:
+        state = self._state(chat_id)
+        try:
+            if mode == "thr_pct":
+                value = self.subs.set_min_profit_percent(
+                    chat_id, self._parse_threshold_number(text)
+                )
+                label = f"Мин. прибыль %: <b>{value:g}%</b>"
+            elif mode == "thr_amt":
+                value = self.subs.set_min_profit_amount(
+                    chat_id, int(self._parse_threshold_number(text, as_amount=True))
+                )
+                label = f"Мин. прибыль ₽: <b>{value:,} ₽</b>".replace(",", " ")
+            else:
+                value = self.subs.set_above_reference_percent(
+                    chat_id, self._parse_threshold_number(text)
+                )
+                label = f"Порог выше медианы: <b>+{value:g}%</b>"
+        except ValueError:
+            self._send(chat_id, "❌ Не понял число ≥ 0. Пример: <code>12</code> или <code>5к</code>")
+            return
+
+        message_id = state.threshold_message_id
+        state.mode = None
+        state.threshold_message_id = None
+        self._send(chat_id, f"✅ {label}")
+        if message_id is not None:
+            self._edit_threshold_keyboard(chat_id, message_id)
+        else:
+            self._show_threshold(chat_id)
 
     def _show_threshold(self, chat_id: str) -> None:
         self.subs.upsert_user(chat_id)
@@ -865,7 +1054,7 @@ class TelegramBotApp:
             "chat_id": chat_id,
             "text": self._threshold_text(chat_id),
             "parse_mode": "HTML",
-            "reply_markup": {"inline_keyboard": self._threshold_keyboard()},
+            "reply_markup": {"inline_keyboard": self._threshold_keyboard(chat_id)},
         })
 
     def _edit_threshold_keyboard(self, chat_id: str, message_id: int) -> None:
@@ -874,7 +1063,7 @@ class TelegramBotApp:
             "message_id": message_id,
             "text": self._threshold_text(chat_id),
             "parse_mode": "HTML",
-            "reply_markup": {"inline_keyboard": self._threshold_keyboard()},
+            "reply_markup": {"inline_keyboard": self._threshold_keyboard(chat_id)},
         })
 
     def _send_history_chart(
@@ -924,6 +1113,22 @@ class TelegramBotApp:
                 self._api("sendMessage", {
                     "chat_id": chat_id,
                     "text": caption,
+                    "parse_mode": "HTML",
+                })
+                return
+
+            if self.subs.get_chart_mode(chat_id) == "text":
+                text_chart = format_history_chart(
+                    item_name=name,
+                    prices=prices,
+                    times=times,
+                    median=median,
+                    quality_label=q_label,
+                    potential_label=p_label,
+                )
+                self._api("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": text_chart,
                     "parse_mode": "HTML",
                 })
                 return
@@ -1021,10 +1226,10 @@ class TelegramBotApp:
             "<b>Твои категории (📦 Лоты):</b>",
             *lot_lines,
             f"  Мин. прибыль: {min_pct_label}% / {min_sum:,} ₽".replace(",", " "),
-            f"  Порог «дороже ориентира»: +{threshold_label}%",
+            f"  Выше медианы: +{threshold_label}% · "
+            f"{'показ вкл' if self.subs.get_show_above_median(chat_id) else 'показ выкл'}",
+            f"  График: {'картинка' if self.subs.get_chart_mode(chat_id) == 'png' else 'текст'}",
             f"  Заточки: {potentials}",
-            "  Уведомление: ≥10% ниже следующего лота",
-            "  Медиана продаж — только справка в сообщении",
         ]
         if is_admin:
             lines.append(f"• Свои предметы: {len(custom)}")

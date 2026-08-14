@@ -80,6 +80,7 @@ class StalzoneClient:
         self.request_delay_seconds = max(0.0, request_delay_seconds)
         self.max_retries = max(1, max_retries)
         self._last_request_at = 0.0
+        self._cooldown_until = 0.0
         self._rate_lock = threading.Lock()
         self._local = threading.local()
         self._pool_size = max(4, pool_size)
@@ -123,13 +124,51 @@ class StalzoneClient:
         return headers
 
     def _throttle(self) -> None:
-        if self.request_delay_seconds <= 0:
-            return
-        with self._rate_lock:
-            elapsed = time.monotonic() - self._last_request_at
-            if elapsed < self.request_delay_seconds:
-                time.sleep(self.request_delay_seconds - elapsed)
-            self._last_request_at = time.monotonic()
+        while True:
+            with self._rate_lock:
+                now = time.monotonic()
+                cooldown = self._cooldown_until - now
+                delay = 0.0
+                if self.request_delay_seconds > 0:
+                    elapsed = now - self._last_request_at
+                    if elapsed < self.request_delay_seconds:
+                        delay = self.request_delay_seconds - elapsed
+                wait = max(cooldown, delay)
+                if wait <= 0:
+                    self._last_request_at = time.monotonic()
+                    return
+            time.sleep(min(wait, 1.0))
+
+    @staticmethod
+    def _rate_limit_wait_seconds(response: requests.Response) -> int:
+        """Секунды ожидания после 429. API отдаёт reset в unix ms."""
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(1, min(int(float(retry_after)), 60))
+            except ValueError:
+                pass
+
+        reset = response.headers.get("X-Ratelimit-Reset")
+        if not reset:
+            return 5
+        try:
+            value = int(float(reset))
+        except ValueError:
+            return 5
+
+        # миллисекунды (типичный вид: 13+ цифр)
+        if value >= 1_000_000_000_000:
+            value //= 1000
+
+        now = int(time.time())
+        if value > now:
+            wait = value - now
+        else:
+            # уже относительные секунды до сброса
+            wait = value
+        # не блокируем бота на весь rate-limit window
+        return max(1, min(wait, 60))
 
     def _request(self, path: str, params: dict[str, Any] | None = None) -> Any:
         self._throttle()
@@ -148,13 +187,13 @@ class StalzoneClient:
                 )
 
                 if response.status_code == 429:
-                    reset = response.headers.get("X-Ratelimit-Reset")
-                    wait_seconds = 5
-                    if reset:
-                        try:
-                            wait_seconds = max(1, int(reset) - int(time.time()))
-                        except ValueError:
-                            pass
+                    wait_seconds = self._rate_limit_wait_seconds(response)
+                    with self._rate_lock:
+                        self._cooldown_until = max(
+                            self._cooldown_until,
+                            time.monotonic() + wait_seconds,
+                        )
+                    print(f"[API] 429 {path}: ждём {wait_seconds}с")
                     time.sleep(wait_seconds)
                     continue
 

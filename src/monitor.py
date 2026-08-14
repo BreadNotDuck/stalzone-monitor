@@ -44,6 +44,7 @@ class SaleReference:
     count: int
     level: str  # full (3+), low (1-2), none
     prices: tuple[int, ...] = ()
+    times: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class DealCandidate:
     confidence: str  # confirmed | partial | preliminary
     item_category: str = "artifacts"
     history_prices: tuple[int, ...] = ()
+    history_times: tuple[str, ...] = ()
 
 
 class AuctionMonitor:
@@ -542,10 +544,20 @@ class AuctionMonitor:
             and entry.quality == quality
             and entry.potential == potential
         ]
+        times = [
+            entry.time
+            for entry in history_cache[item_id]
+            if entry.price > 0
+            and entry.quality == quality
+            and entry.potential == potential
+        ]
+        # история API обычно от новых к старым — для графика нужна хронология
+        prices = tuple(reversed(prices))
+        times = tuple(reversed(times))
         if len(prices) >= 3:
-            return SaleReference(int(statistics.median(prices)), len(prices), "full", tuple(prices))
+            return SaleReference(int(statistics.median(prices)), len(prices), "full", prices, times)
         if len(prices) >= 1:
-            return SaleReference(int(statistics.mean(prices)), len(prices), "low", tuple(prices))
+            return SaleReference(int(statistics.mean(prices)), len(prices), "low", prices, times)
         return None
 
     def _sale_reference_by_quality(
@@ -563,10 +575,17 @@ class AuctionMonitor:
             for entry in history_cache[item_id]
             if entry.price > 0 and entry.quality == quality
         ]
+        times = [
+            entry.time
+            for entry in history_cache[item_id]
+            if entry.price > 0 and entry.quality == quality
+        ]
+        prices = tuple(reversed(prices))
+        times = tuple(reversed(times))
         if len(prices) >= 3:
-            return SaleReference(int(statistics.median(prices)), len(prices), "full", tuple(prices))
+            return SaleReference(int(statistics.median(prices)), len(prices), "full", prices, times)
         if len(prices) >= 1:
-            return SaleReference(int(statistics.mean(prices)), len(prices), "low", tuple(prices))
+            return SaleReference(int(statistics.mean(prices)), len(prices), "low", prices, times)
         return None
 
     def _find_cheapest_deal(
@@ -653,6 +672,7 @@ class AuctionMonitor:
             confidence=confidence,
             item_category=item_category,
             history_prices=sale_ref.prices if sale_ref else (),
+            history_times=sale_ref.times if sale_ref else (),
         )
 
     def _recipients_for_candidate(
@@ -732,16 +752,29 @@ class AuctionMonitor:
                 min_amount = self.subs_store.get_min_profit_amount(target, default=0)
                 if discount_vs_next < min_pct or profit_gap < min_amount:
                     continue
-            if not self.store.try_claim(
-                lot_key, target, item.id, candidate.lot.buyout_price or 0
-            ):
-                self._stats.skipped_seen += 1
-                continue
             threshold = self.settings.above_reference_percent
             if self.subs_store:
                 threshold = self.subs_store.get_above_reference_percent(
                     target, default=self.settings.above_reference_percent
                 )
+            avg = candidate.average_price
+            buyout_price = candidate.lot.buyout_price or 0
+            # личный фильтр: не слать лоты ≥ порога выше медианы
+            if (
+                self.subs_store
+                and not self.subs_store.get_show_above_median(target)
+                and avg
+                and avg > 0
+                and buyout_price > avg
+            ):
+                markup = (buyout_price / avg - 1) * 100
+                if markup + 1e-9 >= threshold:
+                    continue
+            if not self.store.try_claim(
+                lot_key, target, item.id, candidate.lot.buyout_price or 0
+            ):
+                self._stats.skipped_seen += 1
+                continue
             personal_message = format_deal_message(
                 item_name=item.name or item.id,
                 item_id=item.id,
@@ -760,6 +793,7 @@ class AuctionMonitor:
                 next_lot_reference_percent=self.settings.next_lot_reference_percent,
                 above_reference_percent=threshold,
                 history_prices=list(candidate.history_prices) or None,
+                history_times=list(candidate.history_times) or None,
             )
             markup = deal_history_keyboard(
                 item_id=item.id,

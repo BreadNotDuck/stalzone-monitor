@@ -68,6 +68,55 @@ def format_history_caption(
     return "\n".join(lines)
 
 
+def format_history_chart(
+    *,
+    item_name: str,
+    prices: list[int],
+    times: list[str] | None = None,
+    median: int | None = None,
+    quality_label: str | None = None,
+    potential_label: str | None = None,
+) -> str:
+    """Текстовый график продаж + медиана."""
+    lines: list[str] = ["📈 <b>Медиана продаж</b>", f"<b>{item_name}</b>"]
+    meta: list[str] = []
+    if quality_label:
+        meta.append(quality_label)
+    if potential_label:
+        meta.append(potential_label)
+    if meta:
+        lines.append(" · ".join(meta))
+
+    if not prices:
+        lines.append("Нет подходящих продаж в истории.")
+        return "\n".join(lines)
+
+    med = median if median is not None else sorted(prices)[len(prices) // 2]
+    lines.append(f"Медиана: <b>{_money(int(med))}</b> ₽ · продаж: {len(prices)}")
+    lines.append(f"<code>{sparkline(prices)}</code>")
+    lines.append(
+        f"мин {_money(min(prices))} · макс {_money(max(prices))} · "
+        f"посл. {_money(prices[-1])}"
+    )
+
+    sample_n = min(12, len(prices))
+    sample_prices = prices[-sample_n:]
+    sample_times = (times or [""] * len(prices))[-sample_n:]
+    lo = min(sample_prices)
+    hi = max(sample_prices)
+    span = max(1, hi - lo)
+    lines.append("")
+    lines.append("<pre>")
+    for price, raw_t in zip(sample_prices, sample_times, strict=False):
+        bar_len = 1 + int(round((price - lo) / span * 14))
+        bar = "█" * bar_len
+        dt = _parse_time(raw_t)
+        stamp = dt.strftime("%d.%m %H:%M") if dt else "—"
+        lines.append(f"{stamp} {_money(price):>9} {bar}")
+    lines.append("</pre>")
+    return "\n".join(lines)
+
+
 def render_history_chart_png(
     *,
     item_name: str,
@@ -94,7 +143,7 @@ def render_history_chart_png(
         except Exception:
             continue
 
-    fig, ax = plt.subplots(figsize=(10.5, 5.8), dpi=160)
+    fig, ax = plt.subplots(figsize=(10.5, 5.8), dpi=140 if len(prices) > 60 else 160)
     fig.patch.set_facecolor("#0f1419")
     ax.set_facecolor("#151b22")
 
@@ -115,20 +164,54 @@ def render_history_chart_png(
         ax.set_xticks([])
         ax.set_yticks([])
     else:
+        # слишком плотные маркеры на длинной серии раздувают PNG
+        marker_size = 3.0 if len(prices) > 60 else 4.5
         xs: list[Any]
+        use_dates = False
         parsed_times = [_parse_time(t) for t in (times or [])]
         if times and len(parsed_times) == len(prices) and all(parsed_times):
-            xs = parsed_times  # type: ignore[assignment]
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
-            fig.autofmt_xdate(rotation=25, ha="right")
+            # naive UTC — меньше сюрпризов у matplotlib date converters
+            xs = [dt.replace(tzinfo=None) if dt.tzinfo else dt for dt in parsed_times]  # type: ignore[union-attr]
+            use_dates = True
         else:
             xs = list(range(1, len(prices) + 1))
 
         med = median if median is not None else sorted(prices)[len(prices) // 2]
-        ax.fill_between(xs, prices, med, where=[p >= med for p in prices], color="#3d9a6a", alpha=0.18, interpolate=True)
-        ax.fill_between(xs, prices, med, where=[p < med for p in prices], color="#c45c5c", alpha=0.18, interpolate=True)
-        ax.plot(xs, prices, color="#6cb6ff", linewidth=2.2, marker="o", markersize=4.5, markerfacecolor="#dceeff", markeredgewidth=0)
+        try:
+            if use_dates:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+                ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
+                fig.autofmt_xdate(rotation=25, ha="right")
+            ax.fill_between(xs, prices, med, where=[p >= med for p in prices], color="#3d9a6a", alpha=0.18, interpolate=True)
+            ax.fill_between(xs, prices, med, where=[p < med for p in prices], color="#c45c5c", alpha=0.18, interpolate=True)
+            ax.plot(
+                xs,
+                prices,
+                color="#6cb6ff",
+                linewidth=2.2,
+                marker="o",
+                markersize=marker_size,
+                markerfacecolor="#dceeff",
+                markeredgewidth=0,
+            )
+        except (OverflowError, ValueError):
+            # fallback: индекс по оси X, если даты/локатор ломаются
+            xs = list(range(1, len(prices) + 1))
+            ax.cla()
+            ax.set_facecolor("#151b22")
+            ax.fill_between(xs, prices, med, where=[p >= med for p in prices], color="#3d9a6a", alpha=0.18, interpolate=True)
+            ax.fill_between(xs, prices, med, where=[p < med for p in prices], color="#c45c5c", alpha=0.18, interpolate=True)
+            ax.plot(
+                xs,
+                prices,
+                color="#6cb6ff",
+                linewidth=2.2,
+                marker="o",
+                markersize=marker_size,
+                markerfacecolor="#dceeff",
+                markeredgewidth=0,
+            )
+
         ax.axhline(med, color="#f0c14b", linewidth=1.8, linestyle="--", label=f"Медиана {_money(int(med))} ₽")
 
         ax.set_ylabel("Цена, ₽", color="#c5ced9")

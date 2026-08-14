@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -58,10 +59,32 @@ def _money(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
-def _sales_suffix(count: int | None) -> str:
-    if not count:
-        return ""
-    return f", из {count} продаж"
+def _parse_time(raw: str) -> datetime | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _week_prices(prices: list[int], times: list[str] | None) -> list[int]:
+    if not prices:
+        return []
+    if not times or len(times) != len(prices):
+        return prices[-24:]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    recent: list[int] = []
+    for price, raw_t in zip(prices, times):
+        dt = _parse_time(raw_t)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt >= cutoff:
+            recent.append(price)
+    return recent or prices[-24:]
 
 
 def format_deal_message(
@@ -83,62 +106,79 @@ def format_deal_message(
     next_lot_reference_percent: float = 1,
     above_reference_percent: float = 5,
     history_prices: list[int] | None = None,
+    history_times: list[str] | None = None,
 ) -> str:
     from .artifact_meta import potential_label, quality_emoji, quality_label
 
     lines: list[str] = []
+    confirmed = confidence == "confirmed"
+    ref_gen = "медианы" if confirmed else "ориентира"
 
-    if average_price is not None:
-        confirmed = confidence == "confirmed"
-        sales = _sales_suffix(reference_count)
+    if average_price is not None and average_price > 0:
+        sales = f" из {reference_count} продаж" if reference_count else ""
         if buyout_price > average_price:
             markup = (buyout_price / average_price - 1) * 100
             if markup >= above_reference_percent:
-                ref_label = "медианы" if confirmed else "ориентира"
                 lines.append(
-                    f"⚠️ <b>ДОРОЖЕ {ref_label} на +{markup:.0f}%</b> "
+                    f"⚠️ <b>Выше {ref_gen} на {markup:.0f}%</b> "
                     f"({_money(average_price)} ₽{sales})"
+                )
+            else:
+                lines.append(
+                    f"📐 Стоимость отличается на <b>+{markup:.0f}%</b> "
+                    f"от {ref_gen} ({_money(average_price)} ₽{sales})"
                 )
         else:
             discount_vs_median = (1 - buyout_price / average_price) * 100
-            ref_label = "медианы" if confirmed else "ориентира"
+            mark = "🔥" if discount_vs_median >= 20 else "✅"
             lines.append(
-                f"✅ ниже {ref_label} на <b>{discount_vs_median:.0f}%</b> "
+                f"{mark} <b>Ниже {ref_gen} на {discount_vs_median:.0f}%</b> "
                 f"({_money(average_price)} ₽{sales})"
             )
+    else:
+        lines.append("ℹ️ <b>Нет медианы</b> — мало или нет подходящих продаж")
 
     if next_lot_price is not None:
         next_minus_fee = int(round(next_lot_price * (1 - auction_fee_percent / 100)))
         next_minus_one = int(round(next_lot_price * (1 - next_lot_reference_percent / 100)))
         gap = next_minus_fee - buyout_price
         gap_sign = "+" if gap > 0 else ""
+        ref_l = f"{next_lot_reference_percent:g}".replace(".", ",")
         lines.append(
             f"💵 <b>{gap_sign}{_money(gap)}</b> ₽ · "
-            f"Выставить за: <b>{_money(next_minus_one)}</b> ₽"
+            f"выставить за <b>{_money(next_minus_one)}</b> ₽ (след. −{ref_l}%)"
         )
 
     if quality is not None:
         variant = html.escape(quality_label(quality))
         if potential is not None:
-            variant += f" · {html.escape(potential_label(potential))}"
+            variant += f" — {html.escape(potential_label(potential))}"
         lines.append(f"{quality_emoji(quality)} <b>{variant}</b>")
 
     lines.append(f"<b>{html.escape(item_name)}</b>")
 
     price_bits = [f"💰 <b>{_money(buyout_price)}</b> ₽"]
     if next_lot_price is not None:
-        price_bits.append(f"след. <b>{_money(next_lot_price)}</b> ₽")
-    lines.append(" · ".join(price_bits))
+        next_bit = f"след. <b>{_money(next_lot_price)}</b> ₽"
+        if average_price is not None and average_price > 0:
+            next_vs_median = (next_lot_price / average_price - 1) * 100
+            next_bit += f" ({next_vs_median:+.0f}% от {ref_gen})"
+        price_bits.append(next_bit)
+    lines.append(" — ".join(price_bits))
 
-    if next_lot_price is not None:
+    if next_lot_price is not None and next_lot_price > 0:
         discount_vs_next = (1 - buyout_price / next_lot_price) * 100
         lines.append(f"📉 <b>−{discount_vs_next:.0f}%</b> к след. лоту")
 
     if amount > 1:
         lines.append(f"📦 ×{amount}")
 
-    if history_prices and len(history_prices) >= 2:
-        lines.append(f"📊 <code>{sparkline(history_prices)}</code>")
+    week = _week_prices(list(history_prices or []), history_times)
+    if len(week) >= 2:
+        lines.append(
+            f"📊 7д <code>{sparkline(week)}</code> "
+            f"макс {_money(max(week))} · мин {_money(min(week))}"
+        )
 
     return "\n".join(lines)
 
