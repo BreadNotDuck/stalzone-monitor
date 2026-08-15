@@ -130,7 +130,10 @@ def format_deal_message(
                 )
         else:
             discount_vs_median = (1 - buyout_price / average_price) * 100
-            mark = "🔥" if discount_vs_median >= 20 else "✅"
+            next_also_below = (
+                next_lot_price is not None and next_lot_price < average_price
+            )
+            mark = "🔥" if next_also_below else "✅"
             lines.append(
                 f"{mark} <b>Ниже {ref_gen} на {discount_vs_median:.0f}%</b> "
                 f"({_money(average_price)} ₽{sales})"
