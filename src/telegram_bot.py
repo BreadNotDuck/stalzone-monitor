@@ -21,6 +21,7 @@ from .charts import format_history_caption, format_history_chart, render_history
 from .config import ItemWatch, load_settings
 from .menu import _build_monitor
 from .notifier import escape_html
+from .patchnotes import format_patch_note, patch_keyboard
 from .subscriptions import QUALITY_LOT_CATEGORIES, SIMPLE_LOT_CATEGORIES, SubscriptionsStore
 from .watchlist import add_custom_item, load_custom_items, remove_custom_item
 
@@ -31,6 +32,7 @@ BTN_STATUS = "📋 Статус"
 BTN_RESET = "🔄 Сброс памяти"
 BTN_LOTS = "📦 Лоты"
 BTN_THRESHOLD = "📊 Порог"
+BTN_PATCHNOTES = "📜 Патчноуты"
 BTN_ADD = "➕ Добавить"
 BTN_REMOVE = "➖ Удалить"
 BTN_SUBS = "👥 Подписки"
@@ -40,14 +42,14 @@ BTN_NOTIFY_OFF = "🔕 Уведомления: выкл"
 USER_MENU_BUTTONS_STATIC = [
     [BTN_ONCE, BTN_STATUS],
     [BTN_LOTS, BTN_THRESHOLD],
-    [BTN_RESET],
+    [BTN_PATCHNOTES, BTN_RESET],
 ]
 
 ADMIN_MENU_BUTTONS_STATIC = [
     [BTN_START, BTN_STOP],
     [BTN_ONCE, BTN_STATUS],
     [BTN_LOTS, BTN_THRESHOLD],
-    [BTN_RESET],
+    [BTN_PATCHNOTES, BTN_RESET],
     [BTN_ADD, BTN_REMOVE],
     [BTN_SUBS],
 ]
@@ -77,6 +79,7 @@ MENU_BUTTON_TEXTS = frozenset(
         BTN_RESET,
         BTN_LOTS,
         BTN_THRESHOLD,
+        BTN_PATCHNOTES,
         BTN_ADD,
         BTN_REMOVE,
         BTN_SUBS,
@@ -251,6 +254,7 @@ class TelegramBotApp:
             BTN_RESET: self._reset_seen,
             BTN_LOTS: self._show_lots,
             BTN_THRESHOLD: self._show_threshold,
+            BTN_PATCHNOTES: self._show_patchnotes,
             BTN_ADD: self._begin_add,
             BTN_REMOVE: self._begin_remove,
             BTN_SUBS: self._show_subscriptions,
@@ -273,6 +277,25 @@ class TelegramBotApp:
         data = callback.get("data", "")
         callback_id = callback["id"]
         message_id = callback["message"]["message_id"]
+
+        if data.startswith("patch:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            action = data[6:]
+            if action == "noop":
+                self._answer_callback(callback_id, "Листай стрелками")
+                return
+            try:
+                index = int(action)
+            except ValueError:
+                self._answer_callback(callback_id, "Битые данные")
+                return
+            self._answer_callback(callback_id, f"Патчноут {index + 1}")
+            self._edit_patchnotes(chat_id, message_id, index)
+            return
 
         if data.startswith("ulot:"):
             if not self._is_admin(chat_id):
@@ -1055,6 +1078,25 @@ class TelegramBotApp:
             "text": self._threshold_text(chat_id),
             "parse_mode": "HTML",
             "reply_markup": {"inline_keyboard": self._threshold_keyboard(chat_id)},
+        })
+
+    def _show_patchnotes(self, chat_id: str) -> None:
+        self._api("sendMessage", {
+            "chat_id": chat_id,
+            "text": format_patch_note(0),
+            "parse_mode": "HTML",
+            "reply_markup": patch_keyboard(0),
+            "disable_web_page_preview": True,
+        })
+
+    def _edit_patchnotes(self, chat_id: str, message_id: int, index: int) -> None:
+        self._api("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": format_patch_note(index),
+            "parse_mode": "HTML",
+            "reply_markup": patch_keyboard(index),
+            "disable_web_page_preview": True,
         })
 
     def _edit_threshold_keyboard(self, chat_id: str, message_id: int) -> None:
