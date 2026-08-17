@@ -205,6 +205,12 @@ def deal_history_keyboard(
                     "text": "📈 Медиана продаж",
                     "callback_data": f"hist:{item_id}:{q}:{p}",
                 }
-            ]
+            ],
+            [
+                {
+                    "text": "🔇 Не слать этот арт",
+                    "callback_data": f"mute:{item_id}",
+                }
+            ],
         ]
     }

@@ -123,6 +123,21 @@ class SubscriptionsStore:
                 conn.execute(
                     "ALTER TABLE subscribers ADD COLUMN chart_mode TEXT NOT NULL DEFAULT 'png'"
                 )
+            if "max_balance" not in columns:
+                conn.execute(
+                    "ALTER TABLE subscribers ADD COLUMN max_balance INTEGER NOT NULL DEFAULT 0"
+                )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS muted_items (
+                    chat_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    item_name TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (chat_id, item_id)
+                )
+                """
+            )
 
     @staticmethod
     def _parse_dt(value: str | None) -> datetime | None:
@@ -343,6 +358,83 @@ class SubscriptionsStore:
                     (normalized, chat_id),
                 )
         return normalized
+
+    def get_max_balance(self, chat_id: str, default: int = 0) -> int:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT max_balance FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return max(0, int(row[0]))
+
+    def set_max_balance(self, chat_id: str, value: int) -> int:
+        self.upsert_user(chat_id)
+        clamped = max(0, min(2_000_000_000, int(value)))
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET max_balance = ? WHERE chat_id = ?",
+                    (clamped, chat_id),
+                )
+        return clamped
+
+    def clear_max_balance(self, chat_id: str) -> int:
+        return self.set_max_balance(chat_id, 0)
+
+    def list_muted_items(self, chat_id: str) -> list[tuple[str, str | None]]:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT item_id, item_name FROM muted_items
+                    WHERE chat_id = ?
+                    ORDER BY COALESCE(item_name, item_id) COLLATE NOCASE
+                    """,
+                    (chat_id,),
+                ).fetchall()
+        return [(str(row[0]), row[1]) for row in rows]
+
+    def is_item_muted(self, chat_id: str, item_id: str) -> bool:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM muted_items WHERE chat_id = ? AND item_id = ?",
+                    (chat_id, item_id),
+                ).fetchone()
+        return row is not None
+
+    def mute_item(self, chat_id: str, item_id: str, item_name: str | None = None) -> bool:
+        """True если добавили, False если уже был."""
+        self.upsert_user(chat_id)
+        now = self._format_dt(datetime.now(timezone.utc)) or ""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                existing = conn.execute(
+                    "SELECT 1 FROM muted_items WHERE chat_id = ? AND item_id = ?",
+                    (chat_id, item_id),
+                ).fetchone()
+                if existing:
+                    return False
+                conn.execute(
+                    """
+                    INSERT INTO muted_items (chat_id, item_id, item_name, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (chat_id, item_id, item_name, now),
+                )
+        return True
+
+    def unmute_item(self, chat_id: str, item_id: str) -> bool:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "DELETE FROM muted_items WHERE chat_id = ? AND item_id = ?",
+                    (chat_id, item_id),
+                )
+                return cur.rowcount > 0
 
     def get_lot_categories(self, chat_id: str) -> dict[str, bool]:
         with self._lock:

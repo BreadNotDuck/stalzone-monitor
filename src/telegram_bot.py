@@ -32,6 +32,7 @@ BTN_STATUS = "📋 Статус"
 BTN_RESET = "🔄 Сброс памяти"
 BTN_LOTS = "📦 Лоты"
 BTN_THRESHOLD = "📊 Порог"
+BTN_MUTE = "🔇 Игнор"
 BTN_PATCHNOTES = "📜 Патчноуты"
 BTN_ADD = "➕ Добавить"
 BTN_REMOVE = "➖ Удалить"
@@ -42,14 +43,16 @@ BTN_NOTIFY_OFF = "🔕 Уведомления: выкл"
 USER_MENU_BUTTONS_STATIC = [
     [BTN_ONCE, BTN_STATUS],
     [BTN_LOTS, BTN_THRESHOLD],
-    [BTN_PATCHNOTES, BTN_RESET],
+    [BTN_MUTE, BTN_PATCHNOTES],
+    [BTN_RESET],
 ]
 
 ADMIN_MENU_BUTTONS_STATIC = [
     [BTN_START, BTN_STOP],
     [BTN_ONCE, BTN_STATUS],
     [BTN_LOTS, BTN_THRESHOLD],
-    [BTN_PATCHNOTES, BTN_RESET],
+    [BTN_MUTE, BTN_PATCHNOTES],
+    [BTN_RESET],
     [BTN_ADD, BTN_REMOVE],
     [BTN_SUBS],
 ]
@@ -68,7 +71,7 @@ LOT_NAV_BUTTONS = {
 }
 
 
-THRESHOLD_INPUT_MODES = frozenset({"thr_pct", "thr_amt", "thr_warn"})
+THRESHOLD_INPUT_MODES = frozenset({"thr_pct", "thr_amt", "thr_warn", "thr_bal"})
 
 MENU_BUTTON_TEXTS = frozenset(
     {
@@ -79,6 +82,7 @@ MENU_BUTTON_TEXTS = frozenset(
         BTN_RESET,
         BTN_LOTS,
         BTN_THRESHOLD,
+        BTN_MUTE,
         BTN_PATCHNOTES,
         BTN_ADD,
         BTN_REMOVE,
@@ -224,6 +228,9 @@ class TelegramBotApp:
         if state.mode in THRESHOLD_INPUT_MODES and text not in MENU_BUTTON_TEXTS and not text.startswith("/"):
             self._handle_threshold_custom_input(chat_id, text, state.mode)
             return
+        if state.mode == "mute_add" and text not in MENU_BUTTON_TEXTS and not text.startswith("/"):
+            self._handle_mute_query(chat_id, text)
+            return
         if state.mode == "add":
             if not is_admin:
                 state.mode = None
@@ -245,6 +252,8 @@ class TelegramBotApp:
         if state.mode in THRESHOLD_INPUT_MODES:
             state.mode = None
             state.threshold_message_id = None
+        if state.mode == "mute_add":
+            state.mode = None
 
         handlers = {
             BTN_START: self._start_monitor,
@@ -254,6 +263,7 @@ class TelegramBotApp:
             BTN_RESET: self._reset_seen,
             BTN_LOTS: self._show_lots,
             BTN_THRESHOLD: self._show_threshold,
+            BTN_MUTE: self._show_muted,
             BTN_PATCHNOTES: self._show_patchnotes,
             BTN_ADD: self._begin_add,
             BTN_REMOVE: self._begin_remove,
@@ -413,6 +423,111 @@ class TelegramBotApp:
                 self._edit_threshold_keyboard(chat_id, message_id)
             except ValueError as exc:
                 self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("ubal:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            action = data[5:]
+            try:
+                if action == "custom":
+                    self._begin_threshold_custom(chat_id, message_id, "thr_bal")
+                    self._answer_callback(callback_id, "Введи баланс")
+                    return
+                if action == "clear":
+                    self.subs.clear_max_balance(chat_id)
+                    self._answer_callback(callback_id, "Баланс сброшен (без лимита)")
+                    self._edit_threshold_keyboard(chat_id, message_id)
+                    return
+                if action.startswith("set:"):
+                    value = self.subs.set_max_balance(chat_id, int(float(action[4:])))
+                    self._answer_callback(
+                        callback_id,
+                        f"Баланс: {value:,} ₽".replace(",", " ") if value else "Без лимита",
+                    )
+                    self._edit_threshold_keyboard(chat_id, message_id)
+                    return
+                self._answer_callback(callback_id, "Неизвестная команда")
+            except ValueError as exc:
+                self._answer_callback(callback_id, str(exc))
+            return
+
+        if data.startswith("mute:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            item_id = data[5:].strip()
+            if not item_id:
+                self._answer_callback(callback_id, "Битые данные")
+                return
+            found = self.catalog.find_by_id(item_id)
+            name = found.name if found else item_id
+            added = self.subs.mute_item(chat_id, item_id, name)
+            if added:
+                self._answer_callback(callback_id, "Больше не шлём этот арт")
+                self._send(
+                    chat_id,
+                    f"🔇 Игнор: <b>{escape_html(name)}</b> (<code>{escape_html(item_id)}</code>)\n"
+                    "Снять — в меню 🔇 Игнор.",
+                )
+            else:
+                self._answer_callback(callback_id, "Уже в игноре")
+            return
+
+        if data.startswith("unmute:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            item_id = data[7:].strip()
+            if self.subs.unmute_item(chat_id, item_id):
+                self._answer_callback(callback_id, "Снято с игнора")
+            else:
+                self._answer_callback(callback_id, "Не было в игноре")
+            self._edit_muted_panel(chat_id, message_id)
+            return
+
+        if data == "muteadd":
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            self._state(chat_id).mode = "mute_add"
+            self._answer_callback(callback_id, "Введи название или id")
+            self._send(
+                chat_id,
+                "🔇 Отправь <b>название</b> арта или <b>item id</b>, "
+                "чтобы больше не получать по нему уведомления.",
+            )
+            return
+
+        if data.startswith("mutepick:"):
+            if not self._is_admin(chat_id):
+                subscriber = self.subs.get(chat_id)
+                if subscriber is None or not subscriber.is_active:
+                    self._answer_callback(callback_id, "Нет активной подписки")
+                    return
+            item_id = data[9:].strip()
+            found = self.catalog.find_by_id(item_id)
+            name = found.name if found else item_id
+            added = self.subs.mute_item(chat_id, item_id, name)
+            self._state(chat_id).mode = None
+            if added:
+                self._answer_callback(callback_id, "В игноре")
+            else:
+                self._answer_callback(callback_id, "Уже было")
+            self._send(
+                chat_id,
+                f"🔇 Игнор: <b>{escape_html(name)}</b> (<code>{escape_html(item_id)}</code>)",
+            )
+            self._show_muted(chat_id)
             return
 
         if data.startswith("uthr:"):
@@ -918,28 +1033,31 @@ class TelegramBotApp:
         min_sum = self.subs.get_min_profit_amount(user_chat_id)
         show_above = self.subs.get_show_above_median(user_chat_id)
         chart_mode = self.subs.get_chart_mode(user_chat_id)
+        balance = self.subs.get_max_balance(user_chat_id)
         warn_l = f"{warn:g}".replace(".", ",")
         pct_l = f"{min_pct:g}".replace(".", ",")
         above_l = "вкл" if show_above else "выкл"
         chart_l = "картинка PNG" if chart_mode == "png" else "текст"
+        bal_l = "без лимита" if balance <= 0 else f"{balance:,} ₽".replace(",", " ")
         return (
             "<b>📊 Пороги уведомлений</b>\n\n"
             f"<b>1) Мин. прибыль %</b> (к след. лоту): <b>{pct_l}%</b>\n"
             "Лот придёт, только если дешевле следующего минимум на этот %.\n\n"
             f"<b>2) Мин. прибыль ₽</b> (после комиссии): <b>{min_sum:,} ₽</b>\n".replace(",", " ")
             + "Лот придёт, только если «выгода» ≥ этой суммы.\n\n"
-            f"<b>3) Выше медианы</b>: порог <b>+{warn_l}%</b>, "
+            f"<b>3) Баланс</b>: <b>{bal_l}</b>\n"
+            "Лоты дороже баланса тебе не приходят. 0 / сброс = без лимита.\n\n"
+            f"<b>4) Выше медианы</b>: порог <b>+{warn_l}%</b>, "
             f"показ таких лотов: <b>{above_l}</b>\n"
             "Если показ <b>выкл</b> — лоты дороже медианы на этот % и более "
             "тебе не приходят.\n\n"
-            f"<b>4) График по кнопке</b>: <b>{chart_l}</b>\n"
-            "Все пороги только ≥ 0."
+            f"<b>5) График по кнопке</b>: <b>{chart_l}</b>\n"
+            "Все пороги только ≥ 0. Игнор артов — кнопка 🔇 Игнор."
         )
 
     def _threshold_keyboard(self, chat_id: str) -> list[list[dict[str, str]]]:
         show_above = self.subs.get_show_above_median(chat_id)
         chart_mode = self.subs.get_chart_mode(chat_id)
-        # вкл = показывать дорогие; выкл = скрывать (≥ порога)
         above_btn = (
             "🔔 Показ лотов выше медианы: ВКЛ"
             if show_above
@@ -976,6 +1094,18 @@ class TelegramBotApp:
                 {"text": "+50к", "callback_data": "upfa:50000"},
             ],
             [{"text": "✏️ Своя ₽", "callback_data": "upfa:custom"}],
+            [{"text": "— Баланс (макс. цена лота) —", "callback_data": "uthr:noop"}],
+            [
+                {"text": "50к", "callback_data": "ubal:set:50000"},
+                {"text": "100к", "callback_data": "ubal:set:100000"},
+                {"text": "250к", "callback_data": "ubal:set:250000"},
+                {"text": "500к", "callback_data": "ubal:set:500000"},
+            ],
+            [
+                {"text": "1м", "callback_data": "ubal:set:1000000"},
+                {"text": "✏️ Свой", "callback_data": "ubal:custom"},
+                {"text": "♾ Без лимита", "callback_data": "ubal:clear"},
+            ],
             [{"text": "— Выше медианы —", "callback_data": "uthr:noop"}],
             [{"text": above_btn, "callback_data": "uthr:toggle_above"}],
             [
@@ -1016,6 +1146,11 @@ class TelegramBotApp:
                 "Примеры: <code>0</code>, <code>4</code>, <code>7.5</code>\n"
                 "Диапазон: 0–50."
             ),
+            "thr_bal": (
+                "✏️ Введи свой <b>баланс</b> (макс. цена лота) в ₽.\n"
+                "Примеры: <code>150000</code>, <code>250к</code>, <code>1м</code>\n"
+                "Чтобы убрать лимит — отправь <code>0</code>."
+            ),
         }
         self._send(chat_id, prompts[mode])
 
@@ -1053,6 +1188,14 @@ class TelegramBotApp:
                     chat_id, int(self._parse_threshold_number(text, as_amount=True))
                 )
                 label = f"Мин. прибыль ₽: <b>{value:,} ₽</b>".replace(",", " ")
+            elif mode == "thr_bal":
+                value = self.subs.set_max_balance(
+                    chat_id, int(self._parse_threshold_number(text, as_amount=True))
+                )
+                if value <= 0:
+                    label = "Баланс: <b>без лимита</b>"
+                else:
+                    label = f"Баланс: <b>{value:,} ₽</b>".replace(",", " ")
             else:
                 value = self.subs.set_above_reference_percent(
                     chat_id, self._parse_threshold_number(text)
@@ -1087,6 +1230,88 @@ class TelegramBotApp:
             "parse_mode": "HTML",
             "reply_markup": patch_keyboard(0),
             "disable_web_page_preview": True,
+        })
+
+    def _muted_text(self, chat_id: str) -> str:
+        muted = self.subs.list_muted_items(chat_id)
+        lines = [
+            "<b>🔇 Игнор артов</b>",
+            "Эти предметы не будут приходить в уведомлениях.",
+            "",
+        ]
+        if not muted:
+            lines.append("Список пуст.")
+        else:
+            for item_id, name in muted[:40]:
+                label = escape_html(name or item_id)
+                lines.append(f"• {label} <code>{escape_html(item_id)}</code>")
+            if len(muted) > 40:
+                lines.append(f"… и ещё {len(muted) - 40}")
+        lines.append("")
+        lines.append("Добавить: кнопка ниже или 🔇 на карточке лота.")
+        return "\n".join(lines)
+
+    def _muted_keyboard(self, chat_id: str) -> list[list[dict[str, str]]]:
+        keyboard: list[list[dict[str, str]]] = [
+            [{"text": "➕ Добавить в игнор", "callback_data": "muteadd"}],
+        ]
+        for item_id, name in self.subs.list_muted_items(chat_id)[:20]:
+            label = f"✅ {name or item_id}"[:56]
+            keyboard.append([{"text": label, "callback_data": f"unmute:{item_id}"}])
+        return keyboard
+
+    def _show_muted(self, chat_id: str) -> None:
+        self.subs.upsert_user(chat_id)
+        self._api("sendMessage", {
+            "chat_id": chat_id,
+            "text": self._muted_text(chat_id),
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": self._muted_keyboard(chat_id)},
+        })
+
+    def _edit_muted_panel(self, chat_id: str, message_id: int) -> None:
+        self._api("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": self._muted_text(chat_id),
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": self._muted_keyboard(chat_id)},
+        })
+
+    def _handle_mute_query(self, chat_id: str, text: str) -> None:
+        self._state(chat_id).mode = None
+        query = text.strip()
+        if len(query) <= 8 and query.replace("-", "").isalnum():
+            found = self.catalog.find_by_id(query)
+            item_id = found.id if found else query
+            name = found.name if found else query
+            added = self.subs.mute_item(chat_id, item_id, name)
+            if added:
+                self._send(
+                    chat_id,
+                    f"🔇 Игнор: <b>{escape_html(name)}</b> (<code>{escape_html(item_id)}</code>)",
+                )
+            else:
+                self._send(chat_id, "ℹ️ Уже в игноре.")
+            self._show_muted(chat_id)
+            return
+
+        try:
+            results = self.catalog.search(query, limit=8)
+        except Exception as exc:
+            self._send(chat_id, f"❌ Ошибка поиска: {escape_html(str(exc))}")
+            return
+        if not results:
+            self._send(chat_id, "Ничего не найдено.")
+            return
+        keyboard = []
+        for found in results:
+            label = f"{found.name} ({found.id})"[:60]
+            keyboard.append([{"text": label, "callback_data": f"mutepick:{found.id}"}])
+        self._api("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"Найдено {len(results)}. Нажми, чтобы игнорировать:",
+            "reply_markup": {"inline_keyboard": keyboard},
         })
 
     def _edit_patchnotes(self, chat_id: str, message_id: int, index: int) -> None:
@@ -1268,8 +1493,14 @@ class TelegramBotApp:
             "<b>Твои категории (📦 Лоты):</b>",
             *lot_lines,
             f"  Мин. прибыль: {min_pct_label}% / {min_sum:,} ₽".replace(",", " "),
+            (
+                "  Баланс: без лимита"
+                if self.subs.get_max_balance(chat_id) <= 0
+                else f"  Баланс: ≤ {self.subs.get_max_balance(chat_id):,} ₽".replace(",", " ")
+            ),
             f"  Выше медианы: +{threshold_label}% · "
             f"{'показ вкл' if self.subs.get_show_above_median(chat_id) else 'показ выкл'}",
+            f"  Игнор артов: {len(self.subs.list_muted_items(chat_id))}",
             f"  График: {'картинка' if self.subs.get_chart_mode(chat_id) == 'png' else 'текст'}",
             f"  Заточки: {potentials}",
         ]

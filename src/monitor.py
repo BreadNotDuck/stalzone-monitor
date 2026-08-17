@@ -746,6 +746,11 @@ class AuctionMonitor:
 
         for target in recipients:
             if self.subs_store:
+                if self.subs_store.is_item_muted(target, item.id):
+                    continue
+                balance = self.subs_store.get_max_balance(target)
+                if balance > 0 and buyout > balance:
+                    continue
                 min_pct = self.subs_store.get_min_profit_percent(
                     target, default=self.settings.default_discount_percent
                 )
