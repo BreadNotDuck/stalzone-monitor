@@ -553,6 +553,14 @@ class TelegramBotApp:
                     )
                     self._edit_threshold_keyboard(chat_id, message_id)
                     return
+                if action == "toggle_nomed":
+                    enabled = self.subs.toggle_show_no_median(chat_id)
+                    self._answer_callback(
+                        callback_id,
+                        "Лоты без медианы: ВКЛ" if enabled else "Лоты без медианы: ВЫКЛ",
+                    )
+                    self._edit_threshold_keyboard(chat_id, message_id)
+                    return
                 if action.startswith("chart:"):
                     mode = self.subs.set_chart_mode(chat_id, action[6:])
                     label = "картинка" if mode == "png" else "текст"
@@ -1032,11 +1040,13 @@ class TelegramBotApp:
         min_pct = self.subs.get_min_profit_percent(user_chat_id)
         min_sum = self.subs.get_min_profit_amount(user_chat_id)
         show_above = self.subs.get_show_above_median(user_chat_id)
+        show_no_med = self.subs.get_show_no_median(user_chat_id)
         chart_mode = self.subs.get_chart_mode(user_chat_id)
         balance = self.subs.get_max_balance(user_chat_id)
         warn_l = f"{warn:g}".replace(".", ",")
         pct_l = f"{min_pct:g}".replace(".", ",")
         above_l = "вкл" if show_above else "выкл"
+        nomed_l = "вкл" if show_no_med else "выкл"
         chart_l = "картинка PNG" if chart_mode == "png" else "текст"
         bal_l = "без лимита" if balance <= 0 else f"{balance:,} ₽".replace(",", " ")
         return (
@@ -1051,17 +1061,25 @@ class TelegramBotApp:
             f"показ таких лотов: <b>{above_l}</b>\n"
             "Если показ <b>выкл</b> — лоты дороже медианы на этот % и более "
             "тебе не приходят.\n\n"
-            f"<b>5) График по кнопке</b>: <b>{chart_l}</b>\n"
+            f"<b>5) Без медианы</b>: показ: <b>{nomed_l}</b>\n"
+            "Если выкл — лоты без истории продаж не приходят.\n\n"
+            f"<b>6) График по кнопке</b>: <b>{chart_l}</b>\n"
             "Все пороги только ≥ 0. Игнор артов — кнопка 🔇 Игнор."
         )
 
     def _threshold_keyboard(self, chat_id: str) -> list[list[dict[str, str]]]:
         show_above = self.subs.get_show_above_median(chat_id)
+        show_no_med = self.subs.get_show_no_median(chat_id)
         chart_mode = self.subs.get_chart_mode(chat_id)
         above_btn = (
             "🔔 Показ лотов выше медианы: ВКЛ"
             if show_above
             else "🔕 Показ лотов выше медианы: ВЫКЛ"
+        )
+        nomed_btn = (
+            "🔔 Лоты без медианы: ВКЛ"
+            if show_no_med
+            else "🔕 Лоты без медианы: ВЫКЛ"
         )
         png_mark = "✅" if chart_mode == "png" else "⬜"
         text_mark = "✅" if chart_mode == "text" else "⬜"
@@ -1108,6 +1126,7 @@ class TelegramBotApp:
             ],
             [{"text": "— Выше медианы —", "callback_data": "uthr:noop"}],
             [{"text": above_btn, "callback_data": "uthr:toggle_above"}],
+            [{"text": nomed_btn, "callback_data": "uthr:toggle_nomed"}],
             [
                 {"text": "0%", "callback_data": "uthr:set:0"},
                 {"text": "5%", "callback_data": "uthr:set:5"},
@@ -1500,6 +1519,7 @@ class TelegramBotApp:
             ),
             f"  Выше медианы: +{threshold_label}% · "
             f"{'показ вкл' if self.subs.get_show_above_median(chat_id) else 'показ выкл'}",
+            f"  Без медианы: {'показ вкл' if self.subs.get_show_no_median(chat_id) else 'показ выкл'}",
             f"  Игнор артов: {len(self.subs.list_muted_items(chat_id))}",
             f"  График: {'картинка' if self.subs.get_chart_mode(chat_id) == 'png' else 'текст'}",
             f"  Заточки: {potentials}",

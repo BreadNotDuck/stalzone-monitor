@@ -764,6 +764,13 @@ class AuctionMonitor:
                 )
             avg = candidate.average_price
             buyout_price = candidate.lot.buyout_price or 0
+            no_median = not avg or avg <= 0
+            if (
+                self.subs_store
+                and no_median
+                and not self.subs_store.get_show_no_median(target)
+            ):
+                continue
             # личный фильтр: не слать лоты ≥ порога выше медианы
             if (
                 self.subs_store
