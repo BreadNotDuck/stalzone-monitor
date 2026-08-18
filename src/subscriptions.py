@@ -131,6 +131,10 @@ class SubscriptionsStore:
                 conn.execute(
                     "ALTER TABLE subscribers ADD COLUMN show_no_median INTEGER NOT NULL DEFAULT 1"
                 )
+            if "patch_notify" not in columns:
+                conn.execute(
+                    "ALTER TABLE subscribers ADD COLUMN patch_notify INTEGER NOT NULL DEFAULT 1"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS muted_items (
@@ -139,6 +143,14 @@ class SubscriptionsStore:
                     item_name TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (chat_id, item_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
                 """
             )
@@ -640,6 +652,63 @@ class SubscriptionsStore:
                     (now,),
                 ).fetchall()
         return [str(row[0]) for row in rows]
+
+    def get_patch_notify(self, chat_id: str, default: bool = True) -> bool:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT patch_notify FROM subscribers WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+        if not row or row[0] is None:
+            return default
+        return bool(row[0])
+
+    def set_patch_notify(self, chat_id: str, enabled: bool) -> bool:
+        self.upsert_user(chat_id)
+        value = 1 if enabled else 0
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE subscribers SET patch_notify = ? WHERE chat_id = ?",
+                    (value, chat_id),
+                )
+        return bool(value)
+
+    def toggle_patch_notify(self, chat_id: str) -> bool:
+        return self.set_patch_notify(chat_id, not self.get_patch_notify(chat_id))
+
+    def patch_notify_chat_ids(self) -> list[str]:
+        now = self._format_dt(datetime.now(timezone.utc))
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT chat_id FROM subscribers
+                    WHERE expires_at IS NOT NULL AND expires_at > ?
+                      AND COALESCE(patch_notify, 1) = 1
+                    """,
+                    (now,),
+                ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_meta WHERE key = ?",
+                    (key,),
+                ).fetchone()
+        return str(row[0]) if row and row[0] is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
 
     def adjust(self, chat_id: str, days: int = 0, hours: int = 0) -> Subscriber:
         subscriber = self.get(chat_id)

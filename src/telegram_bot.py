@@ -21,7 +21,12 @@ from .charts import format_history_caption, format_history_chart, render_history
 from .config import ItemWatch, load_settings
 from .menu import _build_monitor
 from .notifier import escape_html
-from .patchnotes import format_patch_note, patch_keyboard
+from .patchnotes import (
+    format_patch_broadcast,
+    format_patch_note,
+    latest_patch_version,
+    patch_keyboard,
+)
 from .subscriptions import QUALITY_LOT_CATEGORIES, SIMPLE_LOT_CATEGORIES, SubscriptionsStore
 from .watchlist import add_custom_item, load_custom_items, remove_custom_item
 
@@ -138,6 +143,8 @@ class TelegramBotApp:
         if settings.auto_start_monitor:
             time.sleep(1)
             self._start_monitor(self.admin_chat_id)
+
+        threading.Thread(target=self._broadcast_new_patch, daemon=True).start()
 
         while True:
             try:
@@ -297,6 +304,21 @@ class TelegramBotApp:
             action = data[6:]
             if action == "noop":
                 self._answer_callback(callback_id, "Листай стрелками")
+                return
+            if action.startswith("notify"):
+                enabled = self.subs.toggle_patch_notify(chat_id)
+                self._answer_callback(
+                    callback_id,
+                    "Рассылка патчей: ВКЛ" if enabled else "Рассылка патчей: ВЫКЛ",
+                )
+                index = 0
+                parts = action.split(":")
+                if len(parts) >= 2:
+                    try:
+                        index = int(parts[1])
+                    except ValueError:
+                        index = 0
+                self._edit_patchnotes(chat_id, message_id, index)
                 return
             try:
                 index = int(action)
@@ -1243,13 +1265,51 @@ class TelegramBotApp:
         })
 
     def _show_patchnotes(self, chat_id: str) -> None:
+        self.subs.upsert_user(chat_id)
         self._api("sendMessage", {
             "chat_id": chat_id,
             "text": format_patch_note(0),
             "parse_mode": "HTML",
-            "reply_markup": patch_keyboard(0),
+            "reply_markup": patch_keyboard(
+                0, notify=self.subs.get_patch_notify(chat_id)
+            ),
             "disable_web_page_preview": True,
         })
+
+    def _edit_patchnotes(self, chat_id: str, message_id: int, index: int) -> None:
+        self._api("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": format_patch_note(index),
+            "parse_mode": "HTML",
+            "reply_markup": patch_keyboard(
+                index, notify=self.subs.get_patch_notify(chat_id)
+            ),
+            "disable_web_page_preview": True,
+        })
+
+    def _broadcast_new_patch(self) -> None:
+        version = latest_patch_version()
+        if not version:
+            return
+        last = self.subs.get_meta("last_broadcast_patch")
+        if last == version:
+            return
+        recipients = list(self.subs.patch_notify_chat_ids())
+        if self.admin_chat_id not in recipients and self.subs.get_patch_notify(
+            self.admin_chat_id
+        ):
+            recipients.append(self.admin_chat_id)
+        text = format_patch_broadcast(0)
+        markup = patch_keyboard(0, notify=True)
+        sent = 0
+        for chat_id in recipients:
+            ok = self.notifier.send(text, chat_id=chat_id, reply_markup=markup)
+            if ok:
+                sent += 1
+            time.sleep(0.05)
+        self.subs.set_meta("last_broadcast_patch", version)
+        print(f"[BOT] патчноут {version}: отправлен {sent}/{len(recipients)}")
 
     def _muted_text(self, chat_id: str) -> str:
         muted = self.subs.list_muted_items(chat_id)
@@ -1331,16 +1391,6 @@ class TelegramBotApp:
             "chat_id": chat_id,
             "text": f"Найдено {len(results)}. Нажми, чтобы игнорировать:",
             "reply_markup": {"inline_keyboard": keyboard},
-        })
-
-    def _edit_patchnotes(self, chat_id: str, message_id: int, index: int) -> None:
-        self._api("editMessageText", {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": format_patch_note(index),
-            "parse_mode": "HTML",
-            "reply_markup": patch_keyboard(index),
-            "disable_web_page_preview": True,
         })
 
     def _edit_threshold_keyboard(self, chat_id: str, message_id: int) -> None:

@@ -16,6 +16,18 @@ class PatchNote:
 # Новые сверху. Добавляй сюда каждую заметную поставку.
 PATCH_NOTES: tuple[PatchNote, ...] = (
     PatchNote(
+        version="1.9",
+        date="18.08.2026",
+        title="Рассылка патчноутов",
+        highlights=(
+            "📬 новый патч приходит в чат всем с активной подпиской",
+            "в 📜 Патчноуты можно выключить рассылку: <b>Рассылка патчей: ВЫКЛ</b>",
+        ),
+        details=(
+            "Лоты и патчи — разные переключатели. Выключение лотов не глушит патчи.",
+        ),
+    ),
+    PatchNote(
         version="1.8",
         date="18.08.2026",
         title="Фильтр лотов без медианы",
@@ -124,6 +136,10 @@ PATCH_NOTES: tuple[PatchNote, ...] = (
 )
 
 
+def latest_patch_version() -> str | None:
+    return PATCH_NOTES[0].version if PATCH_NOTES else None
+
+
 def patch_count() -> int:
     return len(PATCH_NOTES)
 
@@ -164,7 +180,35 @@ def format_patch_note(index: int = 0) -> str:
     return "\n".join(lines)
 
 
-def patch_keyboard(index: int = 0) -> dict[str, Any]:
+def format_patch_broadcast(index: int = 0) -> str:
+    note = get_patch(index)
+    if note is None:
+        return "📜 Пока нет записей в патчноутах."
+    lines = [
+        "✨ <b>Новое обновление</b>",
+        f"📜 Патчноут <b>{escape(note.version)}</b> · {escape(note.date)}",
+        f"<i>{escape(note.title)}</i>",
+        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+        "",
+    ]
+    for item in note.highlights:
+        lines.append(f"• {item}")
+    if note.details:
+        lines.append("")
+        for item in note.details:
+            lines.append(f"· {item}")
+    lines.extend(
+        [
+            "",
+            "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+            "Полный список — кнопка <b>📜 Патчноуты</b>.",
+            "Рассылку можно выключить там же.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def patch_keyboard(index: int = 0, *, notify: bool = True) -> dict[str, Any]:
     total = len(PATCH_NOTES)
     if total <= 0:
         return {"inline_keyboard": []}
@@ -180,6 +224,18 @@ def patch_keyboard(index: int = 0) -> dict[str, Any]:
     extra: list[list[dict[str, str]]] = [row]
     if idx != 0:
         extra.append([{"text": "🔝 К свежему", "callback_data": "patch:0"}])
+    extra.append(
+        [
+            {
+                "text": (
+                    "📢 Рассылка патчей: ВКЛ"
+                    if notify
+                    else "🔕 Рассылка патчей: ВЫКЛ"
+                ),
+                "callback_data": f"patch:notify:{idx}",
+            }
+        ]
+    )
     return {"inline_keyboard": extra}
 
 
